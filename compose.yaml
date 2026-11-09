@@ -1,7 +1,9 @@
-# docker compose up --build                      → GPU (NVIDIA)
-# docker compose --profile cpu up --build lair-cpu → CPU only
+# docker compose up                              → GPU (NVIDIA), pulls the published image
+# docker compose --profile cpu up lair-cpu        → CPU only
+# add --build to compile the image from this repo instead
 #
-# LAIR_MODELS  folder with .gguf files (default ./models)
+# LAIR_MODELS  folder with .gguf files (default ./models); if empty, a small model is downloaded into it
+# LAIR_DEFAULT_MODEL  URL of the .gguf downloaded on first run ("" to never download)
 # LAIR_PORT    host port (default 8080, bound to localhost only)
 # LAIR_TOKEN   if set, the UI and API ask for it
 #
@@ -11,10 +13,11 @@ x-lair: &lair
   ports:
     - "127.0.0.1:${LAIR_PORT:-8080}:8080"
   volumes:
-    - "${LAIR_MODELS:-./models}:/models:ro"
+    - "${LAIR_MODELS:-./models}:/models"
     - lair-data:/data
   environment:
     - LAIR_TOKEN
+    - LAIR_DEFAULT_MODEL
     - LAIR_DATA=/data
     - LAIR_SEARXNG=http://searxng:8080
   restart: unless-stopped
@@ -30,7 +33,7 @@ services:
       args:
         CUDA_ARCH: "${CUDA_ARCH:-86}"
         BUILD_JOBS: "${LAIR_BUILD_JOBS:-4}"
-    image: lair:cuda
+    image: ghcr.io/bernardofernandezz/lair:cuda
     devices:
       - nvidia.com/gpu=all
 
@@ -42,7 +45,7 @@ services:
       target: cpu
       args:
         BUILD_JOBS: "${LAIR_BUILD_JOBS:-4}"
-    image: lair:cpu
+    image: ghcr.io/bernardofernandezz/lair:cpu
     command: ["--gpu-layers", "0"]
 
   searxng:
