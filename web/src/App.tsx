@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AuthError, client, type Api, type Conversation, type ModelInfo } from "./api";
 import { Chat } from "./Chat";
 import { Sidebar } from "./conversations/Sidebar";
+import { SkillsPanel } from "./skills/SkillsPanel";
 import { Gate } from "./Gate";
 import { Orb, type OrbSignal } from "./Orb";
 import { load, save } from "./storage";
@@ -82,6 +83,7 @@ function Workspace({ api, models, signal, onActive, onAuthLost }: WorkspaceProps
   const [visit, setVisit] = useState(0);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [open, setOpen] = useState(() => (load("sidebar") || (innerWidth > 900 ? "open" : "closed")) === "open");
+  const [skillsOpen, setSkillsOpen] = useState(false);
 
   const refresh = useCallback(() => {
     api.conversations().then(setConversations, (e) => e instanceof AuthError && onAuthLost());
@@ -118,7 +120,9 @@ function Workspace({ api, models, signal, onActive, onAuthLost }: WorkspaceProps
         current={current}
         onOpen={go}
         onChanged={refresh}
+        onSkills={() => setSkillsOpen(true)}
       />
+      <SkillsPanel api={api} open={skillsOpen} onClose={() => setSkillsOpen(false)} />
       <Chat
         key={visit}
         api={api}

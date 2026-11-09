@@ -33,6 +33,20 @@ export type StoredMessage = {
 
 export type Hit = { id: string; title: string; snippet: string };
 
+export type Skill = {
+  id: string;
+  name: string;
+  description: string;
+  when: string[];
+  prompt: string;
+  origin: "builtin" | "extra" | "created" | "installed";
+  source: string | null;
+  enabled: boolean;
+};
+
+export type SkillDraft = Pick<Skill, "name" | "description" | "when" | "prompt">;
+export type IndexEntry = { id: string; name: string; description: string; url: string };
+
 export type TurnHandlers = {
   skill: (s: SkillInfo) => void;
   thinking: (text: string) => void;
@@ -103,6 +117,13 @@ export function client(token: string) {
     /** Answers a tool call that is waiting for the user. */
     approve: (callId: string, d: { allow: boolean; always?: boolean }) =>
       send<void>("POST", `/lair/v1/approvals/${encodeURIComponent(callId)}`, d),
+
+    skills: () => get<Skill[]>("/lair/v1/skills"),
+    saveSkill: (id: string, d: SkillDraft) => send<Skill>("PUT", `/lair/v1/skills/${encodeURIComponent(id)}`, d),
+    toggleSkill: (id: string, enabled: boolean) => send<void>("PATCH", `/lair/v1/skills/${encodeURIComponent(id)}`, { enabled }),
+    removeSkill: (id: string) => send<void>("DELETE", `/lair/v1/skills/${encodeURIComponent(id)}`),
+    installSkill: (url: string) => send<Skill>("POST", "/lair/v1/skills/install", { url }),
+    skillsIndex: () => get<{ configured: boolean; skills: { entry: IndexEntry; installed: boolean }[] }>("/lair/v1/skills/index"),
 
     /** Streams one turn. Aborting `signal` disconnects; the server stops and keeps what was generated. */
     async turn(

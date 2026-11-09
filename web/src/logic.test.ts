@@ -42,3 +42,11 @@ test("fromStored groups the assistant and tool messages after a question into on
   expect(reply.parts.map((p) => p.kind)).toEqual(["text", "tool", "text"]);
   expect(reply.parts[1]).toMatchObject({ kind: "tool", step: { name: "list_dir", status: "ok", output: "a.md" } });
 });
+
+import { slug } from "./skills/SkillEditor";
+
+test("slug turns a skill name into a valid id", () => {
+  expect(slug("Resumo Rápido!")).toBe("resumo-rapido");
+  expect(slug("  Ação & Reação  ")).toBe("acao-reacao");
+  expect(slug("???")).toBe("");
+});

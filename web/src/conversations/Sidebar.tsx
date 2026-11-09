@@ -10,9 +10,10 @@ type Props = {
   current: string | null;
   onOpen: (id: string | null) => void;
   onChanged: () => void;
+  onSkills: () => void;
 };
 
-export function Sidebar({ api, open, onToggle, conversations, current, onOpen, onChanged }: Props) {
+export function Sidebar({ api, open, onToggle, conversations, current, onOpen, onChanged, onSkills }: Props) {
   const [q, setQ] = useState("");
   const hits = useSearch(api, q);
   const [editing, setEditing] = useState<string | null>(null);
@@ -91,6 +92,11 @@ export function Sidebar({ api, open, onToggle, conversations, current, onOpen, o
           ))}
         </ul>
         {items.length === 0 && <p className="sidebar-empty">{q ? `Nada encontrado para “${q}”.` : "Suas conversas aparecem aqui."}</p>}
+        <footer className="sidebar-foot">
+          <button className="ghost" onClick={onSkills}>
+            Skills
+          </button>
+        </footer>
       </aside>
     </>
   );

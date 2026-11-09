@@ -95,18 +95,23 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
 
 ## Skills
 
-Skills are prompt packages that lair adds to a request when the user's message asks for them. Every other message reaches the model unchanged.
+Skills are prompt packages that lair adds to a request when the user's message asks for them. Every other message reaches the model unchanged. Manage them in the **Skills** panel at the bottom of the sidebar: switch them on and off, edit them, create new ones, or install them from the network.
 
 The built-in skill, **Cenas 3D**, runs when a message mentions "3D" or "três dimensões". The answer then includes an interactive three.js scene, with orbit, reset and fullscreen. To use local `.glb`/`.gltf` models in scenes, pass `--assets <folder>` or set `LAIR_ASSETS`.
 
-To add your own skills, create one folder per skill and pass the parent folder with `--skills-dir`, or set `LAIR_SKILLS`. A skill with the same id as a built-in replaces it.
+A skill is a folder with two files. A skill runs when one of its `when` phrases appears as a whole word in the last user message. Case and accents are ignored, and at most one skill runs per reply.
 
 ```
-~/lair-skills/pirate/skill.json   { "name": "Pirata", "when": ["pirata", "arr"] }
-~/lair-skills/pirate/prompt.md    Responda como um pirata do século XVIII.
+pirate/skill.json   { "name": "Pirata", "description": "Fala como um pirata.", "when": ["pirata", "arr"] }
+pirate/prompt.md    Responda como um pirata do século XVIII.
 ```
 
-A skill runs when one of its `when` phrases appears as a whole word in the last user message. Case and accents are ignored, and at most one skill runs per reply. Streamed replies announce it with an SSE event named `lair.skill`. Skills are trusted prompt files, so only point lair at folders you control. `--no-skills` turns them off.
+- **Install** from a `.zip`, a GitHub folder (`github.com/owner/repo/tree/branch/folder`), or the URL of a folder holding those two files. Only `skill.json` and `prompt.md` are read from a download.
+- **Browse** an index: point `--skills-index` / `LAIR_SKILLS_INDEX` at a JSON file like `{ "skills": [{ "id", "name", "description", "url" }] }`. lair ships without a default index.
+- **Create** skills in the panel, or let the agent write one with `save_skill`. They're saved under `<data>/skills`. A skill with a built-in's id replaces it until you delete the copy.
+- `--skills-dir` / `LAIR_SKILLS` adds a read-only folder of skills; `--no-skills` turns them all off.
+
+Streamed replies announce the skill in use with an SSE event named `lair.skill`. Skills are trusted prompt text, and one could try to steer the agent, so install only from sources you trust. Risky agent actions still wait for your approval.
 
 ## Project layout
 
