@@ -1,0 +1,36 @@
+# docker compose up --build                      → GPU (NVIDIA)
+# docker compose --profile cpu up --build lair-cpu → CPU only
+#
+# LAIR_MODELS  folder with .gguf files (default ./models)
+# LAIR_PORT    host port (default 8080, bound to localhost only)
+# LAIR_TOKEN   if set, the UI and API ask for it
+
+x-lair: &lair
+  ports:
+    - "127.0.0.1:${LAIR_PORT:-8080}:8080"
+  volumes:
+    - "${LAIR_MODELS:-./models}:/models:ro"
+  environment:
+    - LAIR_TOKEN
+  restart: unless-stopped
+
+services:
+  lair:
+    <<: *lair
+    build:
+      context: .
+      target: cuda
+      args:
+        CUDA_ARCH: "${CUDA_ARCH:-86}"
+    image: lair:cuda
+    devices:
+      - nvidia.com/gpu=all
+
+  lair-cpu:
+    <<: *lair
+    profiles: [cpu]
+    build:
+      context: .
+      target: cpu
+    image: lair:cpu
+    command: ["--gpu-layers", "0"]
