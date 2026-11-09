@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AuthError, type Api, type Conversation, type Effort, type ModelInfo, type Ref } from "./api";
+import { AuthError, ServerStopped, type Api, type Conversation, type Effort, type ModelInfo, type Ref } from "./api";
 import { Composer } from "./Composer";
 import { isEffort, ModelPicker, ReasoningControl } from "./Controls";
 import type { OrbSignal } from "./Orb";
@@ -39,6 +39,8 @@ export function Chat({ api, models: initialModels, conversationId, conversations
   const abort = useRef<AbortController | null>(null);
   const log = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const alive = useRef(true);
+  useEffect(() => () => void (alive.current = false), []);
 
   const current = models.find((m) => m.id === model) ?? models[0];
   const active = turns.length > 0;
@@ -117,7 +119,9 @@ export function Chat({ api, models: initialModels, conversationId, conversations
       if (e instanceof AuthError) return onAuthLost();
       // The server already saved the question, so it stays on screen; only an empty reply is dropped.
       if (reply.parts.length === 0 && !reply.reasoning) setTurns(before);
-      if (!ctl.signal.aborted) setError(`Não foi possível responder: ${(e as Error).message}`);
+      // fetch rejects with a TypeError when the connection itself fails: the server went away mid-turn.
+      if ((e instanceof TypeError || e instanceof ServerStopped) && !ctl.signal.aborted) recover();
+      else if (!ctl.signal.aborted) setError(`Não foi possível responder: ${(e as Error).message}`);
     } finally {
       signal.current.thinking = false;
       setBusy(false);
@@ -125,6 +129,23 @@ export function Chat({ api, models: initialModels, conversationId, conversations
       onTurnEnd();
       api.models().then(setModels, () => {});
     }
+  }
+
+  /** Waits for the server to answer again, then shows the conversation as it was saved. */
+  async function recover() {
+    setError("A conexão com o lair caiu. O que já foi gerado está salvo; esperando o servidor voltar…");
+    for (let tries = 0; alive.current && tries < 90; tries++) {
+      try {
+        setModels(await api.models());
+        if (conv.current) setTurns(fromStored((await api.read(conv.current)).messages));
+        setError(null);
+        onTurnEnd();
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    if (alive.current) setError("O lair não voltou a responder. Confira se o servidor está rodando e recarregue a página.");
   }
 
   return (

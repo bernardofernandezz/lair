@@ -59,6 +59,9 @@ export type TurnHandlers = {
 
 export class AuthError extends Error {}
 
+/** The server stopped (restart, shutdown) during a turn; what it generated is saved. */
+export class ServerStopped extends Error {}
+
 async function check(r: Response): Promise<Response> {
   if (r.status === 401) throw new AuthError("Esse token não abre este servidor.");
   if (!r.ok) {
@@ -144,6 +147,7 @@ export function client(token: string) {
         for (const { event, data } of frames) {
           const d = JSON.parse(data);
           if (event === "error") throw new Error(d.message);
+          if (event === "stopped") throw new ServerStopped("o servidor parou");
           if (event === "skill") on.skill(d);
           else if (event === "thinking") on.thinking(d.text);
           else if (event === "answer") on.answer(d.text);
