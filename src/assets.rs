@@ -4,7 +4,7 @@
 //! Dotfiles, absolute paths and `..` components are rejected; only known 3D
 //! extensions are served.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -42,41 +42,14 @@ impl Assets {
 
     /// Resolves a client-supplied id to a real file, or `None` if it is unsafe.
     pub fn resolve(&self, id: &str) -> Option<PathBuf> {
-        if id.is_empty() || id.len() > 512 || id.contains('\0') {
+        let ext = Path::new(id).extension()?.to_str()?.to_ascii_lowercase();
+        if id.len() > 512 || id.split('/').any(|part| part.starts_with('.')) || !ALLOWED.contains(&ext.as_str()) {
             return None;
         }
-        let rel = Path::new(id);
-        if rel.is_absolute() {
-            return None;
-        }
-        for comp in rel.components() {
-            match comp {
-                Component::Normal(s) => {
-                    let s = s.to_string_lossy();
-                    if s.is_empty() || s.starts_with('.') {
-                        return None;
-                    }
-                }
-                _ => return None,
-            }
-        }
-        let ext = rel.extension()?.to_str()?.to_ascii_lowercase();
-        if !ALLOWED.contains(&ext.as_str()) {
-            return None;
-        }
-        for root in &self.roots {
-            let candidate = root.join(rel);
-            let Ok(canon) = candidate.canonicalize() else { continue };
-            if !canon.starts_with(root) || !canon.is_file() {
-                continue;
-            }
-            let len = canon.metadata().ok()?.len();
-            if len > MAX_BYTES {
-                return None;
-            }
-            return Some(canon);
-        }
-        None
+        self.roots
+            .iter()
+            .filter_map(|root| crate::jail::existing(root, id).ok())
+            .find(|p| p.is_file() && p.metadata().is_ok_and(|m| m.len() <= MAX_BYTES))
     }
 }
 
