@@ -1,10 +1,10 @@
 # lair
 
-Run open-weight LLMs on your own machine. lair is a single Rust binary that loads GGUF models with llama.cpp and serves a web chat and an OpenAI-compatible API. Prompts, replies and models stay on your machine.
+Run open-weight LLMs on your own machine. lair is a single Rust binary that loads GGUF models with llama.cpp and serves a web chat and an HTTP API. Prompts, replies and models stay on your machine.
 
 - **Any GGUF model.** Point lair at a folder and every `.gguf` in it shows up in the model picker. One model is in memory at a time, and picking another swaps it.
 - **Reasoning you can control.** Models that think before answering get three modes: off, light or deep. The reasoning is always kept separate from the answer, both in the UI and in the API.
-- **OpenAI-compatible.** `/v1/chat/completions` (with streaming) and `/v1/models` work with existing OpenAI clients.
+- **Standard chat API.** `/v1/chat/completions` (with streaming) and `/v1/models` use the common chat-completions format, so existing editors and tools can connect.
 - **Web UI included.** The chat UI is built into the binary: markdown answers, a model picker, reasoning modes, and inline 3D scenes.
 - **GPU or CPU.** CUDA build for NVIDIA cards, plain build for everything else.
 

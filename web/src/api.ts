@@ -1,6 +1,6 @@
 export type Msg = { role: "user" | "assistant"; content: string };
 export type ModelInfo = { id: string; thinks: boolean; loaded: boolean };
-/** OpenAI `reasoning_effort` values the server understands. */
+/** `reasoning_effort` values the server understands. */
 export type Effort = "none" | "low" | "high";
 export type Delta = { reasoning?: string; content?: string };
 /** A skill the server activated for this reply. */
