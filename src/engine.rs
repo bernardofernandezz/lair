@@ -83,13 +83,64 @@ pub struct ModelInfo {
     pub thinks: bool,
 }
 
+/// The loaded model's one context, reused across generations instead of allocated for each.
+struct Session<'m> {
+    ctx: LlamaContext<'m>,
+    /// Tokens whose state is in the context's memory, in order; the next prompt reuses the common prefix.
+    cached: Vec<LlamaToken>,
+}
+
+self_cell::self_cell!(
+    /// A model in memory together with the context that borrows it.
+    struct Loaded {
+        owner: LlamaModel,
+        #[not_covariant]
+        dependent: Session,
+    }
+);
+
+impl Session<'_> {
+    /// Keeps the longest prefix of `tokens` already in memory and returns its length. The last token is
+    /// always decoded again, since sampling needs its logits. Models whose memory can't drop a suffix
+    /// (hybrid or recurrent ones) start over from an empty context.
+    fn reuse(&mut self, tokens: &[LlamaToken]) -> usize {
+        let common = self.cached.iter().zip(tokens).take_while(|(a, b)| a == b).count().min(tokens.len() - 1);
+        if common < self.cached.len() {
+            if !self.ctx.clear_kv_cache_seq(Some(0), Some(common as u32), None).unwrap_or(false) {
+                self.ctx.clear_kv_cache();
+                self.cached.clear();
+                return 0;
+            }
+            self.cached.truncate(common);
+        }
+        common
+    }
+
+    /// Decodes `toks` after what is cached, keeping logits for the last one so it can be sampled from.
+    fn feed(&mut self, batch: &mut LlamaBatch, toks: &[LlamaToken]) -> Result<()> {
+        batch.clear();
+        let (start, last) = (self.cached.len(), toks.len() - 1);
+        for (k, t) in toks.iter().enumerate() {
+            batch.add(*t, (start + k) as i32, &[0], k == last)?;
+        }
+        if let Err(e) = self.ctx.decode(batch) {
+            // The context's memory no longer matches `cached`; start clean next time.
+            self.ctx.clear_kv_cache();
+            self.cached.clear();
+            return Err(e.into());
+        }
+        self.cached.extend_from_slice(toks);
+        Ok(())
+    }
+}
+
 /// Every model found on disk; at most one is in memory at a time.
 pub struct Engine {
     backend: LlamaBackend,
     gpu_layers: u32,
     n_ctx: u32,
     catalog: Vec<ModelInfo>,
-    loaded: Option<(usize, LlamaModel)>,
+    loaded: Option<(usize, Loaded)>,
 }
 
 impl Engine {
@@ -145,7 +196,12 @@ impl Engine {
         let params = LlamaModelParams::default().with_n_gpu_layers(self.gpu_layers);
         let model = LlamaModel::load_from_file(&self.backend, path, &params)
             .with_context(|| format!("loading model {}", path.display()))?;
-        self.loaded = Some((i, model));
+        let (backend, n_ctx) = (&self.backend, self.n_ctx);
+        let loaded = Loaded::try_new(model, |m| -> Result<Session> {
+            let params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx)).with_n_batch(n_ctx);
+            Ok(Session { ctx: m.new_context(backend, params)?, cached: Vec::new() })
+        })?;
+        self.loaded = Some((i, loaded));
         Ok(i)
     }
 
@@ -160,100 +216,84 @@ impl Engine {
     ) -> Result<Done> {
         let i = self.load(model_id)?;
         let thinks = self.catalog[i].thinks;
-        let model = &self.loaded.as_ref().expect("load() just set it").1;
-
-        let mut prompt = render_prompt(model, msgs)?;
-        // Some templates open the block themselves, so the output starts mid-thought.
-        let opened = thinks && prompt.trim_end().ends_with(OPEN);
-        if thinks && p.reasoning == Reasoning::Off {
-            if !opened {
-                prompt.push_str(OPEN);
-            }
-            prompt.push_str(FORCED_CLOSE);
-        }
-        let mut split = ThinkSplit::new(opened && p.reasoning != Reasoning::Off);
-        let budget = (thinks && p.reasoning == Reasoning::Light).then_some(LIGHT_BUDGET);
-
-        let vocab = model.vocab();
-        // Templates usually emit BOS themselves; avoid a double BOS.
-        let bos = vocab.text(vocab.bos()).and_then(|s| s.to_str().ok()).unwrap_or("");
-        let add_bos = bos.is_empty() || !prompt.starts_with(bos);
-        let tokens = vocab.tokenize(prompt.as_bytes(), add_bos, true);
-
         let n_ctx = self.n_ctx as usize;
-        if tokens.len() >= n_ctx {
-            bail!("prompt is {} tokens, context is {n_ctx}", tokens.len());
-        }
-
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(self.n_ctx))
-            .with_n_batch(self.n_ctx);
-        let mut ctx = model.new_context(&self.backend, ctx_params)?;
-
-        let mut batch = LlamaBatch::new(n_ctx, 1);
-        let mut pos = 0;
-        feed(&mut ctx, &mut batch, &tokens, &mut pos)?;
-
-        let mut sampler = if p.temperature <= 0.0 {
-            LlamaSampler::greedy()
-        } else {
-            LlamaSampler::chain_simple([
-                LlamaSampler::top_p(p.top_p, 1),
-                LlamaSampler::temp(p.temperature),
-                LlamaSampler::dist(p.seed.unwrap_or(u32::MAX)), // u32::MAX is llama.cpp's "seed randomly"
-            ])
-        };
-
-        let mut produced = 0;
-        let mut thought = 0;
-        let mut utf8 = Utf8Buf::default();
-        let stopped = Cell::new(false);
-        let mut emit = |part: Part| {
-            if !stopped.get() && !on_part(part) {
-                stopped.set(true);
-            }
-        };
-        let finish_reason = loop {
-            if produced >= p.max_tokens || pos >= n_ctx {
-                break "length";
-            }
-            let tok = sampler.sample(&ctx, batch.n_tokens() - 1);
-            if vocab.is_eog(tok) {
-                break "stop";
-            }
-            produced += 1;
-            split.push(&utf8.push(&vocab.token_to_piece(tok, false, None)), &mut emit);
-            if stopped.get() {
-                break "stop";
-            }
-            feed(&mut ctx, &mut batch, &[tok], &mut pos)?;
-            if split.thinking() {
-                thought += 1;
-                if budget.is_some_and(|b| thought >= b) {
-                    let close = vocab.tokenize(FORCED_CLOSE.as_bytes(), false, true);
-                    if pos + close.len() >= n_ctx {
-                        break "length";
-                    }
-                    feed(&mut ctx, &mut batch, &close, &mut pos)?;
-                    split.close(&mut emit);
+        let loaded = &mut self.loaded.as_mut().expect("load() just set it").1;
+        loaded.with_dependent_mut(|model, session| {
+            let mut prompt = render_prompt(model, msgs)?;
+            // Some templates open the block themselves, so the output starts mid-thought.
+            let opened = thinks && prompt.trim_end().ends_with(OPEN);
+            if thinks && p.reasoning == Reasoning::Off {
+                if !opened {
+                    prompt.push_str(OPEN);
                 }
+                prompt.push_str(FORCED_CLOSE);
             }
-        };
-        split.finish(&mut emit);
-        Ok(Done { prompt_tokens: tokens.len(), completion_tokens: produced, finish_reason })
-    }
-}
+            let mut split = ThinkSplit::new(opened && p.reasoning != Reasoning::Off);
+            let budget = (thinks && p.reasoning == Reasoning::Light).then_some(LIGHT_BUDGET);
 
-/// Decodes `toks` at `pos`, keeping logits for the last one so it can be sampled from.
-fn feed(ctx: &mut LlamaContext, batch: &mut LlamaBatch, toks: &[LlamaToken], pos: &mut usize) -> Result<()> {
-    batch.clear();
-    let last = toks.len() - 1;
-    for (k, t) in toks.iter().enumerate() {
-        batch.add(*t, (*pos + k) as i32, &[0], k == last)?;
+            let vocab = model.vocab();
+            // Templates usually emit BOS themselves; avoid a double BOS.
+            let bos = vocab.text(vocab.bos()).and_then(|s| s.to_str().ok()).unwrap_or("");
+            let add_bos = bos.is_empty() || !prompt.starts_with(bos);
+            let tokens = vocab.tokenize(prompt.as_bytes(), add_bos, true);
+
+            if tokens.is_empty() || tokens.len() >= n_ctx {
+                bail!("prompt is {} tokens, context is {n_ctx}", tokens.len());
+            }
+
+            let mut batch = LlamaBatch::new(n_ctx, 1);
+            let reused = session.reuse(&tokens);
+            session.feed(&mut batch, &tokens[reused..])?;
+
+            let mut sampler = if p.temperature <= 0.0 {
+                LlamaSampler::greedy()
+            } else {
+                LlamaSampler::chain_simple([
+                    LlamaSampler::top_p(p.top_p, 1),
+                    LlamaSampler::temp(p.temperature),
+                    LlamaSampler::dist(p.seed.unwrap_or(u32::MAX)), // u32::MAX is llama.cpp's "seed randomly"
+                ])
+            };
+
+            let mut produced = 0;
+            let mut thought = 0;
+            let mut utf8 = Utf8Buf::default();
+            let stopped = Cell::new(false);
+            let mut emit = |part: Part| {
+                if !stopped.get() && !on_part(part) {
+                    stopped.set(true);
+                }
+            };
+            let finish_reason = loop {
+                if produced >= p.max_tokens || session.cached.len() >= n_ctx {
+                    break "length";
+                }
+                let tok = sampler.sample(&session.ctx, batch.n_tokens() - 1);
+                if vocab.is_eog(tok) {
+                    break "stop";
+                }
+                produced += 1;
+                split.push(&utf8.push(&vocab.token_to_piece(tok, false, None)), &mut emit);
+                if stopped.get() {
+                    break "stop";
+                }
+                session.feed(&mut batch, &[tok])?;
+                if split.thinking() {
+                    thought += 1;
+                    if budget.is_some_and(|b| thought >= b) {
+                        let close = vocab.tokenize(FORCED_CLOSE.as_bytes(), false, true);
+                        if session.cached.len() + close.len() >= n_ctx {
+                            break "length";
+                        }
+                        session.feed(&mut batch, &close)?;
+                        split.close(&mut emit);
+                    }
+                }
+            };
+            split.finish(&mut emit);
+            Ok(Done { prompt_tokens: tokens.len(), completion_tokens: produced, finish_reason })
+        })
     }
-    ctx.decode(batch)?;
-    *pos += toks.len();
-    Ok(())
 }
 
 fn collect_gguf(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -498,6 +538,8 @@ mod tests {
 
         let (thought, answer, _) = run(&mut engine, base);
         assert!(thought.is_empty() && answer.contains('4'), "off: {thought:?} / {answer:?}");
+        let (_, again, _) = run(&mut engine, base);
+        assert_eq!(again, answer, "a reused context answers like a fresh one");
 
         let light = Params { reasoning: Reasoning::Light, max_tokens: LIGHT_BUDGET + 200, ..base };
         let (_, answer, done) = run(&mut engine, light);
