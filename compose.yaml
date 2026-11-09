@@ -10,8 +10,10 @@ x-lair: &lair
     - "127.0.0.1:${LAIR_PORT:-8080}:8080"
   volumes:
     - "${LAIR_MODELS:-./models}:/models:ro"
+    - lair-data:/data
   environment:
     - LAIR_TOKEN
+    - LAIR_DATA=/data
   restart: unless-stopped
 
 services:
@@ -34,3 +36,6 @@ services:
       target: cpu
     image: lair:cpu
     command: ["--gpu-layers", "0"]
+
+volumes:
+  lair-data:

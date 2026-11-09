@@ -1,16 +1,39 @@
-export type Msg = { role: "user" | "assistant"; content: string };
 export type ModelInfo = { id: string; thinks: boolean; loaded: boolean };
 /** `reasoning_effort` values the server understands. */
 export type Effort = "none" | "low" | "high";
-export type Delta = { reasoning?: string; content?: string };
-/** A skill the server activated for this reply. */
 export type SkillInfo = { id: string; name: string };
+export type Ref = { id: string; title: string };
+
+export type Conversation = {
+  id: string;
+  title: string;
+  model: string | null;
+  effort: Effort | null;
+  agent: boolean;
+  created: number;
+  updated: number;
+};
+
+export type StoredMessage = {
+  id: number;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  reasoning: string | null;
+  skill: SkillInfo | null;
+  refs: Ref[];
+  created: number;
+};
+
+export type Hit = { id: string; title: string; snippet: string };
+
+export type TurnHandlers = {
+  skill: (s: SkillInfo) => void;
+  thinking: (text: string) => void;
+  answer: (text: string) => void;
+  done: (d: { message: number; finish_reason: string }) => void;
+};
 
 export class AuthError extends Error {}
-
-function auth(token: string): Record<string, string> {
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
 
 async function check(r: Response): Promise<Response> {
   if (r.status === 401) throw new AuthError("Esse token não abre este servidor.");
@@ -19,21 +42,6 @@ async function check(r: Response): Promise<Response> {
     throw new Error(body?.error?.message ?? `O servidor respondeu ${r.status}.`);
   }
   return r;
-}
-
-/** Throws AuthError when the token is missing or wrong. */
-export async function listModels(token: string): Promise<ModelInfo[]> {
-  const r = await check(await fetch("/v1/models", { headers: auth(token) }));
-  const body = await r.json();
-  return body.data.map((m: ModelInfo) => ({ id: m.id, thinks: !!m.thinks, loaded: !!m.loaded }));
-}
-
-/**
- * Trades the Bearer token for the HttpOnly `lair_asset` cookie.
- * GLTF textures are loaded by `<img>`, which cannot send an Authorization header.
- */
-export async function createSession(token: string): Promise<void> {
-  await check(await fetch("/v1/session", { method: "POST", headers: auth(token) }));
 }
 
 export type Frame = { event: string; data: string };
@@ -54,39 +62,60 @@ export function takeFrames(buf: string): [Frame[], string] {
   return [frames.filter((f) => f.data), rest];
 }
 
-/** Streams a reply. Aborting `signal` disconnects, which makes the server stop generating. */
-export async function streamChat(
-  req: { model: string; effort: Effort; messages: Msg[] },
-  token: string,
-  signal: AbortSignal,
-  onDelta: (d: Delta) => void,
-  onSkill: (s: SkillInfo) => void,
-): Promise<void> {
-  const r = await check(
-    await fetch("/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...auth(token) },
-      body: JSON.stringify({ model: req.model, reasoning_effort: req.effort, messages: req.messages, stream: true }),
-      signal,
-    }),
-  );
-  const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) return;
-    let frames;
-    [frames, buf] = takeFrames(buf + value);
-    for (const frame of frames) {
-      if (frame.event === "lair.skill") {
-        onSkill(JSON.parse(frame.data));
-        continue;
+export type Api = ReturnType<typeof client>;
+
+/** Every server call, authenticated with `token` (empty when the server has none). */
+export function client(token: string) {
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const json = { ...headers, "content-type": "application/json" };
+  const get = async <T>(path: string): Promise<T> => (await check(await fetch(path, { headers }))).json();
+  const send = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+    const r = await check(await fetch(path, { method, headers: json, body: body === undefined ? undefined : JSON.stringify(body) }));
+    return r.status === 204 ? (undefined as T) : r.json();
+  };
+  const conv = (id: string) => `/lair/v1/conversations/${encodeURIComponent(id)}`;
+
+  return {
+    /** Throws AuthError when the token is missing or wrong. */
+    models: async (): Promise<ModelInfo[]> =>
+      (await get<{ data: ModelInfo[] }>("/v1/models")).data.map((m) => ({ id: m.id, thinks: !!m.thinks, loaded: !!m.loaded })),
+    /**
+     * Trades the token for the HttpOnly `lair_asset` cookie.
+     * GLTF textures are loaded by `<img>`, which cannot send an Authorization header.
+     */
+    session: () => send<void>("POST", "/v1/session"),
+    conversations: () => get<Conversation[]>("/lair/v1/conversations"),
+    search: (q: string) => get<Hit[]>(`/lair/v1/conversations/search?q=${encodeURIComponent(q)}`),
+    create: (c: Partial<Pick<Conversation, "model" | "effort" | "agent">>) => send<Conversation>("POST", "/lair/v1/conversations", c),
+    read: (id: string) => get<{ conversation: Conversation; messages: StoredMessage[] }>(conv(id)),
+    update: (id: string, c: Partial<Pick<Conversation, "title" | "model" | "effort" | "agent">>) =>
+      send<Conversation>("PATCH", conv(id), c),
+    remove: (id: string) => send<void>("DELETE", conv(id)),
+
+    /** Streams one turn. Aborting `signal` disconnects; the server stops and keeps what was generated. */
+    async turn(
+      id: string,
+      input: { content: string; refs: string[]; model: string; effort: Effort },
+      signal: AbortSignal,
+      on: TurnHandlers,
+    ): Promise<void> {
+      const r = await check(await fetch(`${conv(id)}/messages`, { method: "POST", headers: json, body: JSON.stringify(input), signal }));
+      const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        let frames;
+        [frames, buf] = takeFrames(buf + value);
+        for (const { event, data } of frames) {
+          const d = JSON.parse(data);
+          if (event === "error") throw new Error(d.message);
+          if (event === "skill") on.skill(d);
+          else if (event === "thinking") on.thinking(d.text);
+          else if (event === "answer") on.answer(d.text);
+          else if (event === "done") on.done(d);
+        }
       }
-      if (frame.data === "[DONE]") return;
-      const chunk = JSON.parse(frame.data);
-      if (chunk.error) throw new Error(chunk.error.message);
-      const d = chunk.choices?.[0]?.delta ?? {};
-      if (d.reasoning_content || d.content) onDelta({ reasoning: d.reasoning_content, content: d.content });
-    }
-  }
+    },
+  };
 }

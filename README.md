@@ -49,6 +49,12 @@ cargo build --release --features cuda      # drop --features cuda for a CPU-only
 
 Run `lair serve --help` for every option: context size, GPU layers, sampling defaults, host and port.
 
+## Conversations
+
+Conversations are saved on the server, in SQLite under `--data` (`LAIR_DATA`, default `~/.local/share/lair`; a named volume in Docker), so they show up on every device that opens lair. The sidebar lists and searches them by title and content.
+
+Type `@` in a message to cite another conversation. Its most recent part is added to the prompt as quoted context, so the model can use what was said there.
+
 ## Reasoning modes
 
 For models that emit a `<think>` block before answering:
