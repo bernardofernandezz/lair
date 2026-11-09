@@ -11,6 +11,7 @@ mod store;
 mod turn;
 
 use std::path::PathBuf;
+use std::sync::RwLock;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -74,17 +75,21 @@ struct SkillArgs {
     /// Turn off skills (prompt packages added when a message asks for them)
     #[arg(long)]
     no_skills: bool,
-    /// Folder with extra skills; a skill with the same id replaces the built-in
+    /// Read-only folder with extra skills; a skill with the same id replaces the built-in
     #[arg(long, env = "LAIR_SKILLS")]
     skills_dir: Option<PathBuf>,
+    /// URL of a JSON index of skills to browse and install from the UI
+    #[arg(long, env = "LAIR_SKILLS_INDEX")]
+    skills_index: Option<String>,
     /// Folders or files with .glb/.gltf models that 3D scenes may use (repeatable)
     #[arg(long, env = "LAIR_ASSETS")]
     assets: Vec<PathBuf>,
 }
 
 impl SkillArgs {
-    fn catalog(&self) -> Catalog {
-        if self.no_skills { Catalog::default() } else { Catalog::load(self.skills_dir.as_deref()) }
+    /// Skills created or installed here live in `<data>/skills`.
+    fn catalog(&self, data: &std::path::Path) -> Catalog {
+        if self.no_skills { Catalog::default() } else { Catalog::load(self.skills_dir.clone(), data.join("skills")) }
     }
 }
 
@@ -160,9 +165,11 @@ async fn main() -> Result<()> {
             let lair = Lair {
                 models: Models::new(engine),
                 store: Store::open(&data.join("lair.db"))?,
-                skills: skills.catalog(),
+                skills: RwLock::new(skills.catalog(&data)),
+                skills_index: skills.skills_index.clone(),
+                http: agent::tools::http_client(),
                 assets: Assets::new(&skills.assets),
-                tools: Tools::new(workspace, searxng),
+                tools: Tools { workspace, searxng },
                 approvals: Approvals::default(),
                 defaults,
                 // ~3 characters per token; half the context for history, half for the reply.

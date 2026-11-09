@@ -59,7 +59,7 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         seed: req.seed.or(d.seed),
         reasoning: req.reasoning_effort.unwrap_or(d.reasoning),
     };
-    let (skill, messages) = s.lair.skills.apply(&req.messages, s.lair.assets.ids());
+    let (skill, messages) = s.lair.skills.read().unwrap().apply(&req.messages, s.lair.assets.ids());
     let skill = skill.map(|k| json!({ "id": k.id, "name": k.name }));
     let mut rx = s.lair.models.generate(&model, messages, params);
     let created = now();

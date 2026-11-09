@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::jail;
 use crate::lair::Lair;
+use crate::skills::Manifest;
 
 /// Characters of tool output handed back to the model; small models have small contexts.
 const MAX_OUTPUT: usize = 6000;
@@ -51,6 +52,12 @@ pub const SPECS: &[Spec] = &[
         needs_approval: false,
     },
     Spec { name: "read_conversation", usage: r#"lê uma conversa salva pelo id. {"id": "..."}"#, needs_approval: false },
+    Spec { name: "list_skills", usage: "lista as skills e seus gatilhos. {}", needs_approval: false },
+    Spec {
+        name: "save_skill",
+        usage: r#"cria ou substitui uma skill (instruções extras ativadas por palavras). {"id": "pirata", "name": "Pirata", "description": "...", "when": ["pirata"], "prompt": "Responda como um pirata."}"#,
+        needs_approval: true,
+    },
 ];
 
 pub fn spec(name: &str) -> Option<&'static Spec> {
@@ -79,18 +86,18 @@ pub fn system_prompt() -> String {
 pub struct Tools {
     pub workspace: PathBuf,
     pub searxng: Option<String>,
-    http: reqwest::Client,
+}
+
+/// The HTTP client lair uses for everything that reaches the network.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("lair/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("an HTTP client with default settings builds")
 }
 
 impl Tools {
-    pub fn new(workspace: PathBuf, searxng: Option<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .user_agent(concat!("lair/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("an HTTP client with default settings builds");
-        Self { workspace, searxng, http }
-    }
 
     /// Runs one call; the text is what the model reads back, already shortened.
     pub async fn run(&self, lair: &Lair, name: &str, args: &Value) -> Result<String> {
@@ -104,8 +111,24 @@ impl Tools {
                 Ok("apagado".into())
             }
             "run_command" => self.run_command(req(args, "command")?).await,
-            "web_search" => self.web_search(req(args, "query")?).await,
-            "fetch_url" => self.fetch_url(req(args, "url")?).await,
+            "web_search" => self.web_search(&lair.http, req(args, "query")?).await,
+            "fetch_url" => fetch_url(&lair.http, req(args, "url")?).await,
+            "list_skills" => {
+                let catalog = lair.skills.read().unwrap();
+                let lines: Vec<String> = catalog
+                    .list()
+                    .iter()
+                    .map(|s| format!("- {} ({}): {} [gatilhos: {}]{}", s.id, s.name, s.description, s.when.join(", "), if s.enabled { "" } else { " (desligada)" }))
+                    .collect();
+                Ok(lines.join("\n"))
+            }
+            "save_skill" => {
+                let id = req(args, "id")?;
+                let when = args.get("when").and_then(Value::as_array).map(|w| w.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
+                let manifest = Manifest { name: req(args, "name")?.to_owned(), description: str_arg(args, "description").unwrap_or("").to_owned(), when, source: None };
+                lair.skills.write().unwrap().save(id, &manifest, req(args, "prompt")?)?;
+                Ok(format!("skill {id} salva; ela roda quando a mensagem do usuário tiver um dos gatilhos"))
+            }
             "search_conversations" => {
                 let hits = lair.store.search(req(args, "query")?)?;
                 Ok(if hits.is_empty() { "nenhuma conversa encontrada".into() } else { serde_json::to_string_pretty(&hits)? })
@@ -188,7 +211,7 @@ impl Tools {
         Ok(format!("[código de saída {}]\n{}", out.status.code().unwrap_or(-1), text.trim_end()))
     }
 
-    async fn web_search(&self, query: &str) -> Result<String> {
+    async fn web_search(&self, http: &reqwest::Client, query: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Results {
             results: Vec<Hit>,
@@ -201,8 +224,7 @@ impl Tools {
             content: String,
         }
         let base = self.searxng.as_deref().context("busca na web não configurada: defina LAIR_SEARXNG")?;
-        let r: Results = self
-            .http
+        let r: Results = http
             .get(format!("{}/search", base.trim_end_matches('/')))
             .query(&[("q", query), ("format", "json")])
             .send()
@@ -214,26 +236,27 @@ impl Tools {
         Ok(if hits.is_empty() { "nenhum resultado".into() } else { serde_json::to_string_pretty(&hits)? })
     }
 
-    async fn fetch_url(&self, url: &str) -> Result<String> {
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            bail!("só URLs http(s)");
-        }
-        let resp = self.http.get(url).send().await?.error_for_status()?;
-        let html = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.contains("html"));
-        let mut body = Vec::new();
-        let mut resp = resp;
-        while let Some(chunk) = resp.chunk().await? {
-            body.extend_from_slice(&chunk);
-            if body.len() > FETCH_LIMIT {
-                break;
-            }
-        }
-        Ok(if html {
-            html2text::from_read(body.as_slice(), 100).unwrap_or_default()
-        } else {
-            String::from_utf8_lossy(&body).into_owned()
-        })
+}
+
+async fn fetch_url(http: &reqwest::Client, url: &str) -> Result<String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("só URLs http(s)");
     }
+    let resp = http.get(url).send().await?.error_for_status()?;
+    let html = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.contains("html"));
+    let mut body = Vec::new();
+    let mut resp = resp;
+    while let Some(chunk) = resp.chunk().await? {
+        body.extend_from_slice(&chunk);
+        if body.len() > FETCH_LIMIT {
+            break;
+        }
+    }
+    Ok(if html {
+        html2text::from_read(body.as_slice(), 100).unwrap_or_default()
+    } else {
+        String::from_utf8_lossy(&body).into_owned()
+    })
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -261,7 +284,7 @@ mod tests {
         let p = std::env::temp_dir().join(format!("lair-tools-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
-        Tools::new(p, None)
+        Tools { workspace: p, searxng: None }
     }
 
     #[test]
@@ -296,10 +319,10 @@ mod tests {
 
     #[test]
     fn tools_that_change_things_or_go_online_need_approval() {
-        for name in ["write_file", "edit_file", "delete_file", "run_command", "web_search", "fetch_url"] {
+        for name in ["write_file", "edit_file", "delete_file", "run_command", "web_search", "fetch_url", "save_skill"] {
             assert!(spec(name).unwrap().needs_approval, "{name}");
         }
-        for name in ["list_dir", "read_file", "search_conversations", "read_conversation"] {
+        for name in ["list_dir", "read_file", "search_conversations", "read_conversation", "list_skills"] {
             assert!(!spec(name).unwrap().needs_approval, "{name}");
         }
     }

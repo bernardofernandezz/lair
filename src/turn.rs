@@ -112,7 +112,7 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
         last.content = format!("{}{}", reference_context(lair, &refs)?, input.content);
     }
     trim(&mut history, lair.history_chars);
-    let (skill, mut prompt) = lair.skills.apply(&history, lair.assets.ids());
+    let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history, lair.assets.ids());
     if c.agent {
         prompt = with_system(&prompt, &tools::system_prompt());
     }
