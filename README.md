@@ -14,37 +14,65 @@ Run open-weight LLMs on your own machine. lair is a single Rust binary that load
 
 ## Quick start
 
-With Docker and an NVIDIA GPU ([NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) required):
+Linux (x86_64) and macOS (Apple Silicon):
 
 ```bash
-LAIR_MODELS=~/models docker compose up --build
+curl -fsSL https://raw.githubusercontent.com/bernardofernandezz/lair/main/install.sh | sh
+lair serve
 ```
 
-Then open http://localhost:8080. The first build compiles the CUDA kernels and takes a few minutes. It runs at low priority with 4 parallel jobs so the desktop stays usable; on a machine with little free RAM, use `LAIR_BUILD_JOBS=2`. Later builds reuse the compiled dependencies, and `docker compose up` without `--build` starts the image you already have.
-
-No NVIDIA GPU:
+Then open http://localhost:8080. The first time, with no models yet, lair downloads a small reasoning model (Qwen3 4B, ~2.5 GB) and shows the progress. On Linux the installer picks the Vulkan build when a GPU driver is present (NVIDIA, AMD or Intel; no CUDA needed), and the CPU build otherwise. On a Mac it uses Metal.
 
 ```bash
-LAIR_MODELS=~/models docker compose --profile cpu up --build lair-cpu
+lair run              # chat in the terminal (lair run qwen picks a model by name)
+lair pull <url>       # download a .gguf, e.g. https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf
+lair list             # models in ~/.local/share/lair/models
+lair serve --help     # every option: context size, GPU layers, token, port...
 ```
 
-| Variable      | Default    | Purpose                                                              |
-| ------------- | ---------- | -------------------------------------------------------------------- |
-| `LAIR_MODELS` | `./models` | Folder with `.gguf` files, searched recursively and mounted read-only |
-| `LAIR_PORT`   | `8080`     | Host port. Bound to localhost only                                   |
-| `LAIR_TOKEN`  | unset      | When set, the UI and API ask for this token                          |
-| `CUDA_ARCH`   | `86`       | GPU generation to compile for: 75 = RTX 20xx, 86 = 30xx, 89 = 40xx   |
-| `LAIR_BUILD_JOBS` | `4`    | Parallel compile jobs while building the image                       |
+Models live in `~/.local/share/lair/models`. Drop any `.gguf` there, or pass `-m <folder>`.
+
+## Docker
+
+You need Docker. For an NVIDIA GPU, also the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/).
+
+```bash
+curl -O https://raw.githubusercontent.com/bernardofernandezz/lair/main/compose.yaml
+docker compose up                                 # NVIDIA GPU via CUDA (RTX 20xx to 50xx)
+docker compose --profile cpu up lair-cpu          # no NVIDIA GPU
+```
+
+Then open http://localhost:8080. On the first run, with no model in `./models`, lair downloads a small reasoning model (Qwen3 4B, ~2.5 GB) into it and shows the progress in the logs. Later runs start right away.
+
+To use other models, drop `.gguf` files into `./models` (or point `LAIR_MODELS` at a folder that has them) and restart. Every model in the folder shows up in the picker.
+
+| Variable             | Default    | Purpose                                                                 |
+| -------------------- | ---------- | ----------------------------------------------------------------------- |
+| `LAIR_MODELS`        | `./models` | Folder with `.gguf` files, searched recursively                          |
+| `LAIR_DEFAULT_MODEL` | Qwen3 4B   | URL of the `.gguf` downloaded when the folder is empty; `""` never downloads |
+| `LAIR_PORT`          | `8080`     | Host port. Bound to localhost only                                      |
+| `LAIR_TOKEN`         | unset      | When set, the UI and API ask for this token                             |
 
 To reach lair from other devices, set `LAIR_TOKEN`, change the port mapping in `compose.yaml` to `"${LAIR_PORT:-8080}:8080"`, and put HTTPS in front of it.
 
+The agent's web search (`--profile web`) needs `searxng/settings.yml`, so it runs from a clone of this repo.
+
+### Building the image yourself
+
+From a clone, add `--build`: `docker compose up --build`. The first build compiles the CUDA kernels and takes a few minutes. It runs at low priority so the desktop stays usable.
+
+| Variable          | Default | Purpose                                                            |
+| ----------------- | ------- | ------------------------------------------------------------------ |
+| `CUDA_ARCH`       | `86`    | GPU generation to compile for: 75 = RTX 20xx, 86 = 30xx, 89 = 40xx, 120 = 50xx |
+| `LAIR_BUILD_JOBS` | `4`     | Parallel compile jobs; use 2 on a machine with little free RAM     |
+
 ## Build from source
 
-Requires Rust, bun, cmake and clang.
+Requires Rust, bun, cmake and clang. For Vulkan, also the Vulkan headers, `glslc` and SPIR-V headers (Arch: `vulkan-headers shaderc spirv-headers`; Ubuntu 24.04: `libvulkan-dev glslc spirv-headers`).
 
 ```bash
 (cd web && bun install && bun run build)   # the UI is embedded at compile time
-cargo build --release --features cuda      # drop --features cuda for a CPU-only build
+cargo build --release --features vulkan    # or cuda, metal, or none for CPU only
 ```
 
 ```bash
