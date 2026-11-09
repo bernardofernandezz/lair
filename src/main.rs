@@ -1,6 +1,8 @@
 mod assets;
 mod chat;
 mod engine;
+mod jail;
+mod models;
 mod server;
 mod skills;
 
@@ -31,7 +33,7 @@ enum Cmd {
         #[arg(long)]
         system: Option<String>,
     },
-    /// Web UI plus an OpenAI-compatible API (/v1/chat/completions, /v1/models).
+    /// Web UI and HTTP API (chat completions at /v1/chat/completions, models at /v1/models).
     /// The UI is embedded at build time: run `bun install && bun run build` in web/ before `cargo build --release`.
     Serve {
         #[command(flatten)]

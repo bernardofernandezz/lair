@@ -26,7 +26,7 @@ pub struct Msg {
     pub content: String,
 }
 
-/// How much a reasoning model may think. Deserializes from OpenAI's `reasoning_effort` values.
+/// How much a reasoning model may think. Deserializes from the chat API's `reasoning_effort` values.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
 pub enum Reasoning {
     #[serde(rename = "none")]
@@ -56,6 +56,7 @@ pub enum Part<'a> {
     Answer(&'a str),
 }
 
+#[derive(Debug)]
 pub struct Done {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
