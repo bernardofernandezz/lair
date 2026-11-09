@@ -1,4 +1,5 @@
-export type ModelInfo = { id: string; thinks: boolean; loaded: boolean };
+/** `node` is the peer machine the model runs on; absent for this one. */
+export type ModelInfo = { id: string; node?: string; thinks: boolean; loaded: boolean };
 /** `reasoning_effort` values the server understands. */
 export type Effort = "none" | "low" | "high";
 export type SkillInfo = { id: string; name: string };
@@ -101,7 +102,7 @@ export function client(token: string) {
   return {
     /** Throws AuthError when the token is missing or wrong. */
     models: async (): Promise<ModelInfo[]> =>
-      (await get<{ data: ModelInfo[] }>("/v1/models")).data.map((m) => ({ id: m.id, thinks: !!m.thinks, loaded: !!m.loaded })),
+      (await get<{ data: ModelInfo[] }>("/v1/models")).data.map((m) => ({ id: m.id, node: m.node ?? undefined, thinks: !!m.thinks, loaded: !!m.loaded })),
     /**
      * Trades the token for the HttpOnly `lair_asset` cookie.
      * GLTF textures are loaded by `<img>`, which cannot send an Authorization header.

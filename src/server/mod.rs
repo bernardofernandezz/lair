@@ -1,7 +1,8 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -20,6 +21,9 @@ struct AssetsUi;
 mod compat;
 mod native;
 
+/// How often other lair nodes on the tailnet are looked for.
+const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub struct AppState {
     pub lair: Arc<Lair>,
     token: Option<String>,
@@ -27,6 +31,13 @@ pub struct AppState {
 
 pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Result<()> {
     let state = Arc::new(AppState { lair: Arc::new(lair), token });
+    let peers = state.lair.models.peers.clone();
+    tokio::spawn(async move {
+        loop {
+            peers.refresh().await;
+            tokio::time::sleep(PEER_REFRESH).await;
+        }
+    });
     let auth = middleware::from_fn_with_state(state.clone(), require_token);
     let v1 = Router::new()
         .route("/models", get(compat::models))
@@ -39,11 +50,12 @@ pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Res
     let app = Router::new().nest("/v1", v1).nest("/lair/v1", native).fallback(web_ui).with_state(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 
-async fn require_token(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+/// With a token set, a request needs it, unless it comes from a machine in this node's tailnet.
+async fn require_token(State(s): State<Arc<AppState>>, ConnectInfo(from): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
     if let Some(want) = &s.token {
         let bearer = req
             .headers()
@@ -54,7 +66,9 @@ async fn require_token(State(s): State<Arc<AppState>>, req: Request, next: Next)
         // GLTF textures are fetched by <img>, which cannot send Authorization, so the UI also holds
         // the token in an HttpOnly cookie; its Path=/v1/assets keeps browsers from sending it elsewhere.
         let cookie = cookie_value(&req, "lair_asset").unwrap_or_default();
-        let ok = constant_time_eq(bearer.as_bytes(), want.as_bytes()) || constant_time_eq(cookie.as_bytes(), want.as_bytes());
+        let ok = constant_time_eq(bearer.as_bytes(), want.as_bytes())
+            || constant_time_eq(cookie.as_bytes(), want.as_bytes())
+            || s.lair.models.peers.trusts(from.ip()).await;
         if !ok {
             return error(StatusCode::UNAUTHORIZED, "invalid or missing token");
         }

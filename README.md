@@ -6,6 +6,10 @@ Run open-weight LLMs on your own machine. lair is a single Rust binary that load
 - **Reasoning you can control.** Models that think before answering get three modes: off, light or deep. The reasoning is always kept separate from the answer, both in the UI and in the API.
 - **Standard chat API.** `/v1/chat/completions` (with streaming) and `/v1/models` use the common chat-completions format, so existing editors and tools can connect.
 - **Web UI included.** The chat UI is built into the binary: markdown answers, a model picker, reasoning modes, and inline 3D scenes.
+- **Conversations that last.** Saved on the server, searchable, and citable from other conversations with `@`.
+- **An agent when you want one.** The model can read and write files in a workspace, run commands, search the web through your own SearXNG, and look through past conversations, asking before anything risky.
+- **Skills.** Prompt packages that kick in on trigger words; create them in the UI or install them from a URL.
+- **Your machines as one network.** Nodes on your Tailscale network find each other and share their models.
 - **GPU or CPU.** CUDA build for NVIDIA cards, plain build for everything else.
 
 ## Quick start
@@ -54,6 +58,17 @@ Run `lair serve --help` for every option: context size, GPU layers, sampling def
 Conversations are saved on the server, in SQLite under `--data` (`LAIR_DATA`, default `~/.local/share/lair`; a named volume in Docker), so they show up on every device that opens lair. The sidebar lists and searches them by title and content.
 
 Type `@` in a message to cite another conversation. Its most recent part is added to the prompt as quoted context, so the model can use what was said there.
+
+## Your machines, one network
+
+Run lair on several machines in your [Tailscale](https://tailscale.com) network and each node lists the others' models next to its own, as `model@machine`. Pick one and the conversation stays on the machine you're using, while the text is generated on the other. That machine only generates; history, skills and agent tools stay where the conversation lives.
+
+- **Discovery:** lair asks the local `tailscaled` (over `/var/run/tailscale/tailscaled.sock`, or `--tailscale-socket`) which machines are online and checks each for lair on the same port, every minute. Add machines outside the tailnet by hand with `--peer host:port` (`LAIR_PEERS`, comma-separated).
+- **Trust:** a request coming from a machine in your tailnet is verified with `tailscale whois` and needs no token. Everything else follows `LAIR_TOKEN` as usual.
+- **Names:** each node goes by its Tailscale host name; override it with `--name` / `LAIR_NAME`.
+- **Docker:** `docker compose -f compose.yaml -f compose.tailnet.yaml up` shares the host network and mounts the Tailscale socket. The node then listens on all of the host's interfaces, so set `LAIR_TOKEN` to keep the rest of your LAN out.
+
+Nodes talk to each other through lair's own API (`/lair/v1/node`, `/lair/v1/generate`) over the tailnet's encrypted links. No outside service is involved.
 
 ## Agent mode
 
@@ -116,13 +131,17 @@ Streamed replies announce the skill in use with an SSE event named `lair.skill`.
 ## Project layout
 
 ```
-src/engine.rs   model catalog, generation, reasoning modes, <think> splitting
-src/server.rs   HTTP API, token auth, embedded UI
-src/skills.rs   skill loading and triggering
-src/assets.rs   safe access to local glTF files
-src/chat.rs     terminal chat
-web/            React UI (Vite); web/src/scene renders 3D scenes
-skills/         built-in skills, embedded in the binary
+src/engine.rs        local GGUF models: generation, reasoning modes, <think> splitting
+src/models.rs        every usable model, local or on a peer, behind one streaming generate
+src/peers.rs         other lair nodes on the tailnet: discovery, whois trust, remote generation
+src/store.rs         conversations in SQLite, with full-text search
+src/turn.rs          one conversation turn: history, references, skills, the agent loop
+src/agent/           tool-call protocol and parser, tools, approvals
+src/skills/          skill catalog, install from URL/zip/GitHub, index
+src/server/          HTTP: chat-completions format (compat.rs), lair's own API (native.rs), auth, UI
+src/jail.rs          keeps paths inside a folder (workspace, assets)
+web/                 React UI (Vite): chat, sidebar, agent cards, skills panel, 3D scenes
+skills/              built-in skills, embedded in the binary
 ```
 
 Tests: `cargo test` and `cd web && bun test`. To run the model-backed test, set `LAIR_TEST_MODEL=/path/to/model.gguf` and run `cargo test -- --include-ignored`.

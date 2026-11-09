@@ -37,7 +37,7 @@ pub async fn models(State(s): State<Arc<AppState>>) -> Json<Value> {
         .models
         .list()
         .into_iter()
-        .map(|m| json!({ "id": m.id, "object": "model", "owned_by": "local", "thinks": m.thinks, "loaded": m.loaded }))
+        .map(|m| json!({ "id": m.id, "object": "model", "owned_by": m.node.as_deref().unwrap_or("local"), "node": m.node, "thinks": m.thinks, "loaded": m.loaded }))
         .collect();
     Json(json!({ "object": "list", "data": data }))
 }

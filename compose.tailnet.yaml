@@ -1,0 +1,19 @@
+# Join other lair nodes on your Tailscale network:
+#   docker compose -f compose.yaml -f compose.tailnet.yaml up
+#
+# The container shares the host's network so it can reach tailnet machines and see who is calling
+# (machines in your tailnet need no token). It then listens on every interface of the host, so set
+# LAIR_TOKEN to keep the rest of your LAN out.
+
+services:
+  lair:
+    network_mode: host
+    ports: !reset []
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+    environment:
+      - LAIR_SEARXNG=http://127.0.0.1:8888
+
+  searxng:
+    ports:
+      - "127.0.0.1:8888:8080"

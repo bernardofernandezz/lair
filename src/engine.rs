@@ -11,7 +11,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const OPEN: &str = "<think>";
 const CLOSE: &str = "</think>";
@@ -20,7 +20,7 @@ const FORCED_CLOSE: &str = "\n\n</think>\n\n";
 /// Thinking tokens allowed in `Reasoning::Light` before the block is closed for the model.
 const LIGHT_BUDGET: usize = 512;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Msg {
     pub role: String,
     pub content: String,
@@ -38,7 +38,7 @@ pub fn with_system(msgs: &[Msg], extra: &str) -> Vec<Msg> {
 }
 
 /// How much a reasoning model may think. Deserializes from the chat API's `reasoning_effort` values.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub enum Reasoning {
     #[serde(rename = "none")]
     Off,
@@ -49,7 +49,7 @@ pub enum Reasoning {
     Deep,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Params {
     pub temperature: f32,
     pub top_p: f32,

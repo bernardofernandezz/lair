@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import type { Effort, ModelInfo } from "./api";
 
+/** The model's own name; a peer's models are listed as `name@node`. */
+const modelName = (m: ModelInfo) => (m.node ? m.id.slice(0, -(m.node.length + 1)) : m.id);
+
 type PickerProps = { models: ModelInfo[]; value: string; onChange: (id: string) => void; disabled: boolean };
 
 export function ModelPicker({ models, value, onChange, disabled }: PickerProps) {
+  const current = models.find((m) => m.id === value);
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(0);
   const root = useRef<HTMLDivElement>(null);
@@ -59,7 +63,7 @@ export function ModelPicker({ models, value, onChange, disabled }: PickerProps) 
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="chip-label">{value}</span>
+        <span className="chip-label">{current ? modelName(current) + (current.node ? ` em ${current.node}` : "") : value}</span>
         <svg viewBox="0 0 24 24" aria-hidden>
           <path d="M7 10l5 5 5-5" />
         </svg>
@@ -83,8 +87,9 @@ export function ModelPicker({ models, value, onChange, disabled }: PickerProps) 
               onPointerEnter={() => setHi(i)}
               onClick={() => pick(i)}
             >
-              <span className="option-name">{m.id}</span>
+              <span className="option-name">{modelName(m)}</span>
               <span className="option-meta">
+                {m.node ? `Na máquina ${m.node}. ` : ""}
                 {m.thinks ? "Raciocina" : "Responde direto"}
                 {m.loaded && ", já na memória"}
               </span>

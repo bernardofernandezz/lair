@@ -5,13 +5,14 @@ mod engine;
 mod jail;
 mod lair;
 mod models;
+mod peers;
 mod server;
 mod skills;
 mod store;
 mod turn;
 
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -22,6 +23,7 @@ use agent::Approvals;
 use assets::Assets;
 use lair::Lair;
 use models::Models;
+use peers::Peers;
 use store::Store;
 use engine::{Engine, Params, Reasoning};
 use skills::Catalog;
@@ -67,7 +69,40 @@ enum Cmd {
         /// Base URL of a SearXNG instance for the agent's web search, e.g. http://localhost:8888
         #[arg(long, env = "LAIR_SEARXNG")]
         searxng: Option<String>,
+        #[command(flatten)]
+        network: NetworkArgs,
     },
+}
+
+#[derive(Args)]
+struct NetworkArgs {
+    /// Another lair node to use, as host[:port] (repeatable); nodes on your tailnet are found on their own
+    #[arg(long = "peer", env = "LAIR_PEERS", value_delimiter = ',')]
+    peers: Vec<String>,
+    /// tailscaled's socket, for finding and trusting other nodes on the tailnet
+    #[arg(long, env = "LAIR_TAILSCALE_SOCKET", default_value = "/var/run/tailscale/tailscaled.sock")]
+    tailscale_socket: PathBuf,
+    /// This node's name on the network (default: its Tailscale host name)
+    #[arg(long, env = "LAIR_NAME")]
+    name: Option<String>,
+}
+
+impl NetworkArgs {
+    async fn peers(self, port: u16, http: reqwest::Client) -> Peers {
+        let socket = self.tailscale_socket.exists().then_some(self.tailscale_socket);
+        let tailscale = match &socket {
+            Some(s) => Peers::tailscale_name(s).await,
+            None => None,
+        };
+        let name = self
+            .name
+            .or(tailscale)
+            .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_owned()))
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "lair".into());
+        eprintln!("node name {name}{}", if socket.is_some() { ", looking for peers on the tailnet" } else { "" });
+        Peers::new(name, socket, self.peers, port, http)
+    }
 }
 
 #[derive(Args)]
@@ -152,7 +187,7 @@ async fn main() -> Result<()> {
             let (mut engine, params) = model.load()?;
             tokio::task::block_in_place(|| chat::run(&mut engine, params, system))
         }
-        Cmd::Serve { model, skills, host, port, token, data, workspace, searxng } => {
+        Cmd::Serve { model, skills, host, port, token, data, workspace, searxng, network } => {
             if token.is_none() && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
                 eprintln!("warning: serving on {host} without --token; anyone who can reach it can use it");
             }
@@ -162,12 +197,14 @@ async fn main() -> Result<()> {
                 std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
             let (engine, defaults) = model.load()?;
+            let http = agent::tools::http_client();
+            let peers = Arc::new(network.peers(port, http.clone()).await);
             let lair = Lair {
-                models: Models::new(engine),
+                models: Models::new(engine, peers),
                 store: Store::open(&data.join("lair.db"))?,
                 skills: RwLock::new(skills.catalog(&data)),
                 skills_index: skills.skills_index.clone(),
-                http: agent::tools::http_client(),
+                http,
                 assets: Assets::new(&skills.assets),
                 tools: Tools { workspace, searxng },
                 approvals: Approvals::default(),

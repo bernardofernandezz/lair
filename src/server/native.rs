@@ -17,6 +17,8 @@ use tokio_stream::StreamExt;
 
 use super::{error, AppState};
 use crate::agent::Decision;
+use crate::engine::{Msg, Params};
+use crate::peers::{self, NodeInfo};
 use crate::skills::{install, Manifest};
 use crate::store::Settings;
 use crate::turn;
@@ -30,6 +32,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/conversations/{id}", get(read).patch(update).delete(remove))
         .route("/conversations/{id}/messages", post(send))
         .route("/approvals/{id}", post(approve))
+        .route("/node", get(node))
+        .route("/generate", post(generate))
         .route("/skills", get(skills))
         .route("/skills/index", get(skills_index))
         .route("/skills/install", post(install_skill))
@@ -172,4 +176,30 @@ async fn skills_index(State(s): S) -> Response {
         }
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
+}
+
+/// Who this node is and which models it runs, for other nodes on the tailnet.
+async fn node(State(s): S) -> Json<NodeInfo> {
+    Json(NodeInfo { name: s.lair.models.peers.name.clone(), version: env!("CARGO_PKG_VERSION").into(), models: s.lair.models.local() })
+}
+
+#[derive(Deserialize)]
+struct GenerateRequest {
+    model: String,
+    messages: Vec<Msg>,
+    params: Params,
+}
+
+/// Plain generation on one of this machine's models, for a peer. The asking node keeps the
+/// conversation, skills and tools; this node only generates.
+async fn generate(State(s): S, Json(r): Json<GenerateRequest>) -> Response {
+    if !s.lair.models.local().iter().any(|m| m.id == r.model) {
+        return error(StatusCode::NOT_FOUND, format!("model {} is not on this node", r.model));
+    }
+    let rx = s.lair.models.generate_local(&r.model, r.messages, r.params);
+    let events = UnboundedReceiverStream::new(rx).map(|e| {
+        let (name, data) = peers::frame(&e);
+        Ok::<_, Infallible>(Event::default().event(name).data(data.to_string()))
+    });
+    Sse::new(events).into_response()
 }
