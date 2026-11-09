@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Targets: `cuda` (default, NVIDIA GPU) and `cpu`.
+#
+# BUILD_JOBS caps parallel compile jobs. Each CUDA compiler process can take over 1 GB of RAM, so
+# using every core can push a desktop into swap; the build also runs at the lowest CPU priority.
+ARG BUILD_JOBS=4
 
 FROM oven/bun:1.4.4 AS web
 WORKDIR /web
@@ -10,6 +14,8 @@ RUN bun run build
 
 
 FROM rust:1-bookworm AS build-cpu
+ARG BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${BUILD_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 RUN apt-get update && apt-get install -y --no-install-recommends cmake clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -19,7 +25,7 @@ COPY skills skills
 COPY --from=web /web/dist web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=lair-target-cpu \
-    cargo build --release && cp target/release/lair /lair
+    nice -n 19 cargo build --release && cp target/release/lair /lair
 
 FROM debian:bookworm-slim AS cpu
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
@@ -30,6 +36,8 @@ ENTRYPOINT ["lair", "serve", "--host", "0.0.0.0", "--models", "/models"]
 
 
 FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS build-cuda
+ARG BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${BUILD_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 RUN apt-get update && apt-get install -y --no-install-recommends cmake clang libclang-dev curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
@@ -46,7 +54,7 @@ COPY skills skills
 COPY --from=web /web/dist web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=lair-target-cuda \
-    cargo build --release --features cuda && cp target/release/lair /lair
+    nice -n 19 cargo build --release --features cuda && cp target/release/lair /lair
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04 AS cuda
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \

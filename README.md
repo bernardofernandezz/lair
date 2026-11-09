@@ -20,7 +20,7 @@ With Docker and an NVIDIA GPU ([NVIDIA Container Toolkit](https://docs.nvidia.co
 LAIR_MODELS=~/models docker compose up --build
 ```
 
-Then open http://localhost:8080. The first build compiles the CUDA kernels and takes a few minutes.
+Then open http://localhost:8080. The first build compiles the CUDA kernels and takes a few minutes. It runs at low priority with 4 parallel jobs so the desktop stays usable; on a machine with little free RAM, use `LAIR_BUILD_JOBS=2`. Later builds reuse the compiled dependencies, and `docker compose up` without `--build` starts the image you already have.
 
 No NVIDIA GPU:
 
@@ -34,6 +34,7 @@ LAIR_MODELS=~/models docker compose --profile cpu up --build lair-cpu
 | `LAIR_PORT`   | `8080`     | Host port. Bound to localhost only                                   |
 | `LAIR_TOKEN`  | unset      | When set, the UI and API ask for this token                          |
 | `CUDA_ARCH`   | `86`       | GPU generation to compile for: 75 = RTX 20xx, 86 = 30xx, 89 = 40xx   |
+| `LAIR_BUILD_JOBS` | `4`    | Parallel compile jobs while building the image                       |
 
 To reach lair from other devices, set `LAIR_TOKEN`, change the port mapping in `compose.yaml` to `"${LAIR_PORT:-8080}:8080"`, and put HTTPS in front of it.
 

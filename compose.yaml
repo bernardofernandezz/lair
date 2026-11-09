@@ -18,6 +18,8 @@ x-lair: &lair
     - LAIR_DATA=/data
     - LAIR_SEARXNG=http://searxng:8080
   restart: unless-stopped
+  # Reaps the shell commands the agent starts.
+  init: true
 
 services:
   lair:
@@ -27,6 +29,7 @@ services:
       target: cuda
       args:
         CUDA_ARCH: "${CUDA_ARCH:-86}"
+        BUILD_JOBS: "${LAIR_BUILD_JOBS:-4}"
     image: lair:cuda
     devices:
       - nvidia.com/gpu=all
@@ -37,6 +40,8 @@ services:
     build:
       context: .
       target: cpu
+      args:
+        BUILD_JOBS: "${LAIR_BUILD_JOBS:-4}"
     image: lair:cpu
     command: ["--gpu-layers", "0"]
 
