@@ -202,8 +202,9 @@ function Pearl({ signal, docked }: Props) {
     o.rotation.set(m.rx + m.tiltX, m.ry + m.tiltY, 0);
 
     const fit = Math.min(1, viewport.width / 2.2);
-    const scale = docked ? 0.16 : 0.62 * fit;
-    const y = docked ? viewport.height / 2 - 0.32 : 0.35;
+    const dockedScale = Math.min(0.16, viewport.width * 0.08);
+    const scale = docked ? dockedScale : 0.62 * fit;
+    const y = docked ? viewport.height / 2 - dockedScale * 2 : 0.35;
     const k = m.still ? 1 : ease(3.2);
     o.position.y += (y - o.position.y) * k;
     o.scale.setScalar(o.scale.x + (scale - o.scale.x) * k);

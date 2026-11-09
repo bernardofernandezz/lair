@@ -1042,6 +1042,8 @@ code {
   .sidebar {
     width: min(86vw, 340px);
     background: var(--mist);
+  }
+  .has-sidebar .sidebar {
     box-shadow: 0 0 60px -10px rgb(20 16 30 / 0.35);
   }
 }
@@ -1487,21 +1489,27 @@ a.ref-chip {
 }
 
 @media (max-width: 560px) {
-  .segmented button {
-    padding: 4px 6px;
-    font-size: 12px;
+  /* Reasoning modes get their own row so the model, agent switch and send button stay reachable. */
+  .tools {
+    flex-wrap: wrap;
+    row-gap: 8px;
   }
-  .picker {
-    min-width: 64px;
+  .segmented {
+    flex: 1 1 100%;
+    order: 3;
+  }
+  .tools .picker {
+    flex: 1 1 auto;
+    min-width: 0;
   }
   .mark {
     left: 16px;
     font-size: 24px;
   }
   .log {
-    padding-top: 120px;
-    mask-image: linear-gradient(transparent 70px, #000 120px);
-    -webkit-mask-image: linear-gradient(transparent 70px, #000 120px);
+    padding-top: 160px;
+    mask-image: linear-gradient(transparent 110px, #000 160px);
+    -webkit-mask-image: linear-gradient(transparent 110px, #000 160px);
   }
 }
 
