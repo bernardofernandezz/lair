@@ -22,3 +22,5 @@ zip = { version = "9.5.0", default-features = false, features = ["deflate"] }
 
 [features]
 cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+metal = ["llama-cpp-2/metal"]
