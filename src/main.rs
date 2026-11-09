@@ -2,16 +2,23 @@ mod assets;
 mod chat;
 mod engine;
 mod jail;
+mod lair;
 mod models;
 mod server;
 mod skills;
+mod store;
+mod turn;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+use anyhow::Context;
 use assets::Assets;
+use lair::Lair;
+use models::Models;
+use store::Store;
 use engine::{Engine, Params, Reasoning};
 use skills::Catalog;
 
@@ -47,6 +54,9 @@ enum Cmd {
         /// Require `Authorization: Bearer <token>` on the API
         #[arg(long, env = "LAIR_TOKEN")]
         token: Option<String>,
+        /// Where conversations and installed skills are kept (default: ~/.local/share/lair)
+        #[arg(long, env = "LAIR_DATA")]
+        data: Option<PathBuf>,
     },
 }
 
@@ -113,6 +123,14 @@ impl ModelArgs {
     }
 }
 
+fn default_data_dir() -> Result<PathBuf> {
+    let base = match std::env::var_os("XDG_DATA_HOME") {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set; pass --data")?).join(".local/share"),
+    };
+    Ok(base.join("lair"))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
@@ -120,13 +138,23 @@ async fn main() -> Result<()> {
             let (mut engine, params) = model.load()?;
             tokio::task::block_in_place(|| chat::run(&mut engine, params, system))
         }
-        Cmd::Serve { model, skills, host, port, token } => {
+        Cmd::Serve { model, skills, host, port, token, data } => {
             if token.is_none() && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
                 eprintln!("warning: serving on {host} without --token; anyone who can reach it can use it");
             }
-            let (engine, params) = model.load()?;
-            let (catalog, assets) = (skills.catalog(), Assets::new(&skills.assets));
-            server::run(engine, params, token, format!("{host}:{port}"), catalog, assets).await
+            let data = data.map_or_else(default_data_dir, Ok)?;
+            std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
+            let (engine, defaults) = model.load()?;
+            let lair = Lair {
+                models: Models::new(engine),
+                store: Store::open(&data.join("lair.db"))?,
+                skills: skills.catalog(),
+                assets: Assets::new(&skills.assets),
+                defaults,
+                // ~3 characters per token; half the context for history, half for the reply.
+                history_chars: model.ctx as usize * 3 / 2,
+            };
+            server::run(lair, token, format!("{host}:{port}")).await
         }
     }
 }

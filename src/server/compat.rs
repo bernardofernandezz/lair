@@ -33,6 +33,7 @@ pub struct ChatRequest {
 
 pub async fn models(State(s): State<Arc<AppState>>) -> Json<Value> {
     let data: Vec<Value> = s
+        .lair
         .models
         .list()
         .into_iter()
@@ -46,11 +47,11 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         return error(StatusCode::BAD_REQUEST, "messages must not be empty");
     }
     let model = match req.model {
-        Some(id) if s.models.contains(&id) => id,
+        Some(id) if s.lair.models.contains(&id) => id,
         Some(id) => return error(StatusCode::NOT_FOUND, format!("model {id} not found")),
-        None => s.models.default_id(),
+        None => s.lair.models.default_id(),
     };
-    let d = s.defaults;
+    let d = s.lair.defaults;
     let params = Params {
         temperature: req.temperature.unwrap_or(d.temperature),
         top_p: req.top_p.unwrap_or(d.top_p),
@@ -58,9 +59,9 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         seed: req.seed.or(d.seed),
         reasoning: req.reasoning_effort.unwrap_or(d.reasoning),
     };
-    let (skill, messages) = s.skills.apply(&req.messages, s.assets.ids());
+    let (skill, messages) = s.lair.skills.apply(&req.messages, s.lair.assets.ids());
     let skill = skill.map(|k| json!({ "id": k.id, "name": k.name }));
-    let mut rx = s.models.generate(&model, messages, params);
+    let mut rx = s.lair.models.generate(&model, messages, params);
     let created = now();
     let id = format!("chatcmpl-{created}");
 

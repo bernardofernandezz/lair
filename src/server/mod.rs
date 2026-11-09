@@ -10,10 +10,7 @@ use axum::{Json, Router};
 use rust_embed::RustEmbed;
 use serde_json::json;
 
-use crate::assets::Assets;
-use crate::engine::{Engine, Params};
-use crate::models::Models;
-use crate::skills::Catalog;
+use crate::lair::Lair;
 
 #[derive(RustEmbed)]
 #[folder = "web/dist"]
@@ -21,33 +18,25 @@ use crate::skills::Catalog;
 struct AssetsUi;
 
 mod compat;
+mod native;
 
 pub struct AppState {
-    pub models: Models,
-    pub defaults: Params,
+    pub lair: Arc<Lair>,
     token: Option<String>,
-    pub skills: Catalog,
-    pub assets: Assets,
 }
 
-pub async fn run(
-    engine: Engine,
-    defaults: Params,
-    token: Option<String>,
-    addr: String,
-    skills: Catalog,
-    assets: Assets,
-) -> anyhow::Result<()> {
-    let state = Arc::new(AppState { models: Models::new(engine), defaults, token, skills, assets });
+pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Result<()> {
+    let state = Arc::new(AppState { lair: Arc::new(lair), token });
     let auth = middleware::from_fn_with_state(state.clone(), require_token);
     let v1 = Router::new()
         .route("/models", get(compat::models))
         .route("/chat/completions", post(compat::chat_completions))
         .route("/assets/{*id}", get(asset_file))
         .route("/session", post(create_session))
-        .route_layer(auth)
+        .route_layer(auth.clone())
         .fallback(no_route);
-    let app = Router::new().nest("/v1", v1).fallback(web_ui).with_state(state);
+    let native = native::routes().route_layer(auth).fallback(no_route);
+    let app = Router::new().nest("/v1", v1).nest("/lair/v1", native).fallback(web_ui).with_state(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
     axum::serve(listener, app).await?;
@@ -129,7 +118,7 @@ async fn web_ui(uri: Uri) -> Response {
 }
 
 async fn asset_file(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let Some(path) = s.assets.resolve(&id) else {
+    let Some(path) = s.lair.assets.resolve(&id) else {
         return error(StatusCode::NOT_FOUND, "asset not found");
     };
     match tokio::fs::read(&path).await {
