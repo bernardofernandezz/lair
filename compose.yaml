@@ -4,6 +4,8 @@
 # LAIR_MODELS  folder with .gguf files (default ./models)
 # LAIR_PORT    host port (default 8080, bound to localhost only)
 # LAIR_TOKEN   if set, the UI and API ask for it
+#
+# docker compose --profile web up   also starts SearXNG for the agent's web search
 
 x-lair: &lair
   ports:
@@ -14,6 +16,7 @@ x-lair: &lair
   environment:
     - LAIR_TOKEN
     - LAIR_DATA=/data
+    - LAIR_SEARXNG=http://searxng:8080
   restart: unless-stopped
 
 services:
@@ -36,6 +39,15 @@ services:
       target: cpu
     image: lair:cpu
     command: ["--gpu-layers", "0"]
+
+  searxng:
+    profiles: [web]
+    image: searxng/searxng:2026.10.25-54ca1d9cf
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_SECRET
+    restart: unless-stopped
 
 volumes:
   lair-data:

@@ -1128,6 +1128,120 @@ a.ref-chip {
   background: var(--haze);
 }
 
+/* Agent: mode toggle and tool steps */
+
+.agent-toggle {
+  padding: 6px 12px;
+}
+
+.agent-toggle.is-on {
+  background: var(--ink);
+  color: var(--mist);
+}
+
+.agent-toggle.is-on:hover {
+  background: var(--ink);
+  color: var(--mist);
+}
+
+.tool {
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  font-size: 14px;
+}
+
+.tool summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--slate);
+}
+
+.tool.is-ok .tool-dot {
+  background: #3f9e8f;
+}
+
+.tool.is-error .tool-dot,
+.tool.is-denied .tool-dot {
+  background: var(--danger);
+}
+
+.tool.is-pending .tool-dot,
+.tool.is-running .tool-dot {
+  animation: breathe 1s ease-in-out infinite alternate;
+}
+
+.tool.is-pending {
+  border-color: var(--slate);
+}
+
+@keyframes breathe {
+  from {
+    opacity: 0.25;
+  }
+}
+
+.tool-name {
+  flex: none;
+  font-weight: 550;
+}
+
+.tool-subject {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--slate);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-status {
+  flex: none;
+  margin-left: auto;
+  color: var(--slate);
+  font-size: 13px;
+}
+
+.tool-detail {
+  max-height: 18em;
+  margin: 0;
+  padding: 10px 14px 12px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  color: var(--slate);
+  font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 14px 12px;
+}
+
+.tool-actions .solid,
+.tool-actions .ghost {
+  font-size: 13px;
+}
+
 @media (max-width: 560px) {
   .segmented button {
     padding: 4px 6px;

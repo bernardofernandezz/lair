@@ -55,6 +55,24 @@ Conversations are saved on the server, in SQLite under `--data` (`LAIR_DATA`, de
 
 Type `@` in a message to cite another conversation. Its most recent part is added to the prompt as quoted context, so the model can use what was said there.
 
+## Agent mode
+
+Turn on **Agente** in the composer and the model can act instead of only writing text. It calls tools, lair runs them and hands back the result, up to 8 steps per reply. Each step shows up in the chat as a card.
+
+| Tool | What it does | Asks you first |
+| --- | --- | --- |
+| `list_dir`, `read_file` | Look at files in the workspace | no |
+| `write_file`, `edit_file`, `delete_file` | Change files in the workspace | yes |
+| `run_command` | Run a shell command in the workspace (60 s limit) | yes |
+| `web_search`, `fetch_url` | Search the web through SearXNG, read a page | yes |
+| `search_conversations`, `read_conversation` | Look through your saved conversations | no |
+
+Before running a tool that changes something or goes online, lair shows the exact arguments and waits for **Permitir**, **Sempre nesta conversa** or **Negar**. File paths can't leave the workspace (`--workspace` / `LAIR_WORKSPACE`, default `<data>/workspace`). Shell commands start in the workspace but aren't sandboxed beyond that. Outside Docker they run as your user, so read each one before you allow it.
+
+Web search uses a SearXNG instance you run. `docker compose --profile web up` starts one with lair; otherwise point `--searxng` / `LAIR_SEARXNG` at yours (JSON output must be enabled, as in `searxng/settings.yml`).
+
+lair asks the model to call tools as `<tool_call>{"name": …, "arguments": {…}}</tool_call>`, and also understands the `[tool(arg='…')]` calls some models (LFM, Llama 3.2) write natively. Small models sometimes skip a step. Asking again, or switching to a larger model, usually helps.
+
 ## Reasoning modes
 
 For models that emit a `<think>` block before answering:

@@ -130,6 +130,7 @@ function Workspace({ api, models, signal, onActive, onAuthLost }: WorkspaceProps
         onCreated={(id) => {
           history.replaceState(null, "", `/c/${id}`);
           setCurrent(id);
+          refresh();
         }}
         onTurnEnd={refresh}
         onNew={() => go(null)}

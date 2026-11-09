@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AuthError, type Api, type Conversation, type Effort, type ModelInfo, type Ref, type StoredMessage } from "./api";
+import { AuthError, type Api, type Conversation, type Effort, type ModelInfo, type Ref } from "./api";
 import { Composer } from "./Composer";
 import { isEffort, ModelPicker, ReasoningControl } from "./Controls";
 import type { OrbSignal } from "./Orb";
 import { load, save } from "./storage";
-import { Turns, type Turn } from "./Turns";
+import { Turns } from "./Turns";
+import { addCall, addText, emptyReply, fromStored, setResult, snapshot, type Turn } from "./parts";
 
 type Props = {
   api: Api;
@@ -20,14 +21,6 @@ type Props = {
   onAuthLost: () => void;
 };
 
-const toTurn = (m: StoredMessage): Turn => ({
-  role: m.role === "user" ? "user" : "assistant",
-  content: m.content,
-  reasoning: m.reasoning ?? undefined,
-  skill: m.skill,
-  refs: m.refs,
-});
-
 export function Chat({ api, models: initialModels, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost }: Props) {
   const [models, setModels] = useState(initialModels);
   const [model, setModel] = useState(() => {
@@ -38,6 +31,7 @@ export function Chat({ api, models: initialModels, conversationId, conversations
     const saved = load("effort");
     return isEffort(saved) ? saved : "high";
   });
+  const [agent, setAgent] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -57,9 +51,10 @@ export function Chat({ api, models: initialModels, conversationId, conversations
     if (!conversationId) return;
     api.read(conversationId).then(
       ({ conversation: c, messages }) => {
-        setTurns(messages.filter((m) => m.role !== "tool").map(toTurn));
+        setTurns(fromStored(messages));
         if (c.model && initialModels.some((m) => m.id === c.model)) setModel(c.model);
         if (c.effort) setEffort(c.effort);
+        setAgent(c.agent);
       },
       (e) => (e instanceof AuthError ? onAuthLost() : onNew()),
     );
@@ -78,17 +73,17 @@ export function Chat({ api, models: initialModels, conversationId, conversations
     pinned.current = true;
     setError(null);
     setBusy(true);
-    const before = [...turns, { role: "user", content: text, refs } as Turn];
-    const reply: Turn = { role: "assistant", content: "", reasoning: "" };
-    const show = () => setTurns([...before, { ...reply }]);
+    const before: Turn[] = [...turns, { role: "user", content: text, refs }];
+    const reply = emptyReply();
+    const show = () => setTurns([...before, snapshot(reply)]);
     show();
     let thinkStart = 0;
     try {
       if (!conv.current) {
-        conv.current = (await api.create({ model, effort })).id;
+        conv.current = (await api.create({ model, effort, agent })).id;
         onCreated(conv.current);
       }
-      await api.turn(conv.current, { content: text, refs: refs.map((r) => r.id), model, effort }, ctl.signal, {
+      await api.turn(conv.current, { content: text, refs: refs.map((r) => r.id), model, effort, agent }, ctl.signal, {
         skill: (s) => {
           reply.skill = s;
           show();
@@ -102,9 +97,18 @@ export function Chat({ api, models: initialModels, conversationId, conversations
         },
         answer: (t) => {
           if (thinkStart && reply.thinkMs === undefined) reply.thinkMs = performance.now() - thinkStart;
-          reply.content += t;
+          addText(reply, t);
           signal.current.thinking = false;
           signal.current.pulse = Math.min(1.6, signal.current.pulse + 0.3);
+          show();
+        },
+        toolCall: (call) => {
+          addCall(reply, call);
+          show();
+        },
+        toolResult: (result) => {
+          setResult(reply, result);
+          signal.current.pulse = Math.min(1.6, signal.current.pulse + 0.6);
           show();
         },
         done: () => {},
@@ -112,7 +116,7 @@ export function Chat({ api, models: initialModels, conversationId, conversations
     } catch (e) {
       if (e instanceof AuthError) return onAuthLost();
       // The server already saved the question, so it stays on screen; only an empty reply is dropped.
-      if (!reply.content && !reply.reasoning) setTurns(before);
+      if (reply.parts.length === 0 && !reply.reasoning) setTurns(before);
       if (!ctl.signal.aborted) setError(`Não foi possível responder: ${(e as Error).message}`);
     } finally {
       signal.current.thinking = false;
@@ -139,7 +143,12 @@ export function Chat({ api, models: initialModels, conversationId, conversations
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
         }}
       >
-        <Turns turns={turns} live={busy} loading={!current.loaded && current.id} />
+        <Turns
+          turns={turns}
+          live={busy}
+          loading={!current.loaded && current.id}
+          onDecide={(id, allow, always) => api.approve(id, { allow, always }).catch((e) => setError((e as Error).message))}
+        />
         {error && (
           <p className="error" role="alert">
             {error}
@@ -159,6 +168,15 @@ export function Chat({ api, models: initialModels, conversationId, conversations
           <>
             <ModelPicker models={models} value={model} onChange={setModel} disabled={busy} />
             <ReasoningControl value={effort} onChange={setEffort} available={current.thinks} />
+            <button
+              type="button"
+              className={`chip agent-toggle${agent ? " is-on" : ""}`}
+              aria-pressed={agent}
+              title="Deixa o modelo usar ferramentas: arquivos do workspace, shell, web e suas conversas. Ações que mudam algo pedem sua aprovação."
+              onClick={() => setAgent((a) => !a)}
+            >
+              Agente
+            </button>
           </>
         }
       />
