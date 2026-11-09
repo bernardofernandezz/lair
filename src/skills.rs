@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::engine::Msg;
+use crate::engine::{with_system, Msg};
 
 const BUILTINS: &[(&str, &str, &str)] =
     &[("3d", include_str!("../skills/3d/skill.json"), include_str!("../skills/3d/prompt.md"))];
@@ -140,17 +140,6 @@ fn assets_section(assets: &[String]) -> String {
     }
     if assets.len() > LISTED_ASSETS {
         let _ = writeln!(out, "… e mais {}", assets.len() - LISTED_ASSETS);
-    }
-    out
-}
-
-/// Appends `extra` to the first system message, or adds one at the start.
-fn with_system(msgs: &[Msg], extra: &str) -> Vec<Msg> {
-    let mut out = msgs.to_vec();
-    match out.iter_mut().find(|m| m.role == "system") {
-        Some(sys) if sys.content.is_empty() => sys.content = extra.into(),
-        Some(sys) => sys.content = format!("{}\n\n{extra}", sys.content),
-        None => out.insert(0, Msg { role: "system".into(), content: extra.into() }),
     }
     out
 }

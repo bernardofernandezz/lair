@@ -26,6 +26,17 @@ pub struct Msg {
     pub content: String,
 }
 
+/// Appends `extra` to the first system message, or adds one at the start.
+pub fn with_system(msgs: &[Msg], extra: &str) -> Vec<Msg> {
+    let mut out = msgs.to_vec();
+    match out.iter_mut().find(|m| m.role == "system") {
+        Some(sys) if sys.content.is_empty() => sys.content = extra.into(),
+        Some(sys) => sys.content = format!("{}\n\n{extra}", sys.content),
+        None => out.insert(0, Msg { role: "system".into(), content: extra.into() }),
+    }
+    out
+}
+
 /// How much a reasoning model may think. Deserializes from the chat API's `reasoning_effort` values.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
 pub enum Reasoning {
@@ -343,10 +354,15 @@ impl ThinkSplit {
                     self.state = State::Answer;
                 }
                 State::Answer => {
-                    if !self.pending.is_empty() {
-                        emit(Part::Answer(&self.pending));
-                        self.pending.clear();
+                    // A stray closing tag after the block is never answer text.
+                    while let Some(i) = self.pending.find(CLOSE) {
+                        self.pending.replace_range(i..i + CLOSE.len(), "");
                     }
+                    let n = self.pending.len() - partial_suffix(&self.pending, CLOSE);
+                    if n > 0 {
+                        emit(Part::Answer(&self.pending[..n]));
+                    }
+                    self.pending.drain(..n);
                     return;
                 }
             }
@@ -375,7 +391,7 @@ impl ThinkSplit {
 }
 
 /// Length of the longest proper prefix of `tag` that `s` ends with.
-fn partial_suffix(s: &str, tag: &str) -> usize {
+pub(crate) fn partial_suffix(s: &str, tag: &str) -> usize {
     (1..tag.len()).rev().find(|&k| s.ends_with(&tag[..k])).unwrap_or(0)
 }
 
@@ -437,6 +453,8 @@ mod tests {
     fn think_tag_after_answer_started_is_text() {
         let (t, a) = split(false, &["Use ", "<think>", " tags"]);
         assert_eq!((t.as_str(), a.as_str()), ("", "Use <think> tags"));
+        let (_, a) = split(false, &["Feito.</th", "ink>Pronto"]);
+        assert_eq!(a, "Feito.Pronto", "a stray closing tag is dropped");
     }
 
     #[test]

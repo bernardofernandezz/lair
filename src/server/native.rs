@@ -16,6 +16,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
 use super::{error, AppState};
+use crate::agent::Decision;
 use crate::store::Settings;
 use crate::turn;
 
@@ -27,6 +28,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/conversations/search", get(search))
         .route("/conversations/{id}", get(read).patch(update).delete(remove))
         .route("/conversations/{id}/messages", post(send))
+        .route("/approvals/{id}", post(approve))
 }
 
 fn reply<T: serde::Serialize>(res: anyhow::Result<T>) -> Response {
@@ -78,7 +80,16 @@ async fn search(State(s): S, Query(q): Query<SearchQuery>) -> Response {
     reply(s.lair.store.search(&q.q))
 }
 
-/// Streams one turn as server-sent events named after `turn::Out` (`skill`, `thinking`, `answer`, `done`, `error`).
+/// The user's answer to a tool call waiting for approval.
+async fn approve(State(s): S, Path(id): Path<String>, Json(d): Json<Decision>) -> Response {
+    if s.lair.approvals.answer(&id, d) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        error(StatusCode::NOT_FOUND, "no tool call is waiting with that id")
+    }
+}
+
+/// Streams one turn as server-sent events named after `turn::Out` (`thinking`, `answer`, `tool_call`, …).
 async fn send(State(s): S, Path(id): Path<String>, Json(input): Json<turn::Input>) -> Response {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(turn::run(s.lair.clone(), id, input, tx));

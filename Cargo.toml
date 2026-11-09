@@ -7,8 +7,10 @@ edition = "2024"
 anyhow = "1.0.104"
 axum = "0.8.9"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+html2text = "0.17.4"
 llama-cpp-2 = "0.1.161"
 mime_guess = "2.0.5"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rust-embed = { version = "8.13.0", features = ["mime-guess"] }
 serde = { version = "1.0.229", features = ["derive"] }

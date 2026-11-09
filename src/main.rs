@@ -1,3 +1,4 @@
+mod agent;
 mod assets;
 mod chat;
 mod engine;
@@ -15,6 +16,8 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 use anyhow::Context;
+use agent::tools::Tools;
+use agent::Approvals;
 use assets::Assets;
 use lair::Lair;
 use models::Models;
@@ -57,6 +60,12 @@ enum Cmd {
         /// Where conversations and installed skills are kept (default: ~/.local/share/lair)
         #[arg(long, env = "LAIR_DATA")]
         data: Option<PathBuf>,
+        /// Folder the agent's file and shell tools work in (default: <data>/workspace)
+        #[arg(long, env = "LAIR_WORKSPACE")]
+        workspace: Option<PathBuf>,
+        /// Base URL of a SearXNG instance for the agent's web search, e.g. http://localhost:8888
+        #[arg(long, env = "LAIR_SEARXNG")]
+        searxng: Option<String>,
     },
 }
 
@@ -138,18 +147,23 @@ async fn main() -> Result<()> {
             let (mut engine, params) = model.load()?;
             tokio::task::block_in_place(|| chat::run(&mut engine, params, system))
         }
-        Cmd::Serve { model, skills, host, port, token, data } => {
+        Cmd::Serve { model, skills, host, port, token, data, workspace, searxng } => {
             if token.is_none() && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
                 eprintln!("warning: serving on {host} without --token; anyone who can reach it can use it");
             }
             let data = data.map_or_else(default_data_dir, Ok)?;
-            std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
+            let workspace = workspace.unwrap_or_else(|| data.join("workspace"));
+            for dir in [&data, &workspace] {
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
             let (engine, defaults) = model.load()?;
             let lair = Lair {
                 models: Models::new(engine),
                 store: Store::open(&data.join("lair.db"))?,
                 skills: skills.catalog(),
                 assets: Assets::new(&skills.assets),
+                tools: Tools::new(workspace, searxng),
+                approvals: Approvals::default(),
                 defaults,
                 // ~3 characters per token; half the context for history, half for the reply.
                 history_chars: model.ctx as usize * 3 / 2,
