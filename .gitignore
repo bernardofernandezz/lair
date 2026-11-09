@@ -1,0 +1,5 @@
+target/
+*.gguf
+web/node_modules/
+web/dist/
+models/
