@@ -4,8 +4,7 @@ use anyhow::Result;
 
 use crate::engine::{Engine, Msg, Params, Part};
 
-pub fn run(engine: &mut Engine, params: Params, system: Option<String>) -> Result<()> {
-    let model = engine.models()[0].id.clone();
+pub fn run(engine: &mut Engine, model: &str, params: Params, system: Option<String>) -> Result<()> {
     let base: Vec<Msg> = system
         .map(|s| Msg { role: "system".into(), content: s })
         .into_iter()
@@ -35,7 +34,7 @@ pub fn run(engine: &mut Engine, params: Params, system: Option<String>) -> Resul
 
         let mut reply = String::new();
         let mut in_thought = false;
-        let res = engine.generate(&model, &history, params, |part| {
+        let res = engine.generate(model, &history, params, |part| {
             match part {
                 Part::Thinking(t) => {
                     if !in_thought {

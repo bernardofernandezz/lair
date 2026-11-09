@@ -38,13 +38,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Interactive chat in the terminal, with the first model found
+    /// Interactive chat in the terminal
+    #[command(visible_alias = "run")]
     Chat {
+        /// Model to chat with: any part of its name (default: the first one found)
+        name: Option<String>,
         #[command(flatten)]
         model: ModelArgs,
         /// System prompt
         #[arg(long)]
         system: Option<String>,
+    },
+    /// Download a .gguf model into the models folder
+    Pull {
+        /// URL of the .gguf file, e.g. https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf
+        url: String,
+        /// Folder to save it in (default: ~/.local/share/lair/models)
+        #[arg(short = 'm', long = "models")]
+        models: Option<PathBuf>,
+    },
+    /// List the models in the models folder
+    List {
+        /// Folder to look in (default: ~/.local/share/lair/models)
+        #[arg(short = 'm', long = "models")]
+        models: Option<PathBuf>,
     },
     /// Web UI and HTTP API (chat completions at /v1/chat/completions, models at /v1/models).
     /// The UI is embedded at build time: run `bun install && bun run build` in web/ before `cargo build --release`.
@@ -130,8 +147,8 @@ impl SkillArgs {
 
 #[derive(Args)]
 struct ModelArgs {
-    /// .gguf model files, or directories to search for them (repeatable)
-    #[arg(short = 'm', long = "models", visible_alias = "model", required = true)]
+    /// .gguf model files, or directories to search for them (repeatable; default: <data>/models)
+    #[arg(short = 'm', long = "models", visible_alias = "model")]
     models: Vec<PathBuf>,
     /// Layers to offload to the GPU (0 = CPU only)
     #[arg(long, default_value_t = 99)]
@@ -149,13 +166,40 @@ struct ModelArgs {
     /// How much reasoning models think: none, low (~512 tokens) or high (unlimited)
     #[arg(long, default_value = "high", value_parser = parse_reasoning)]
     reasoning: Reasoning,
+    /// Model downloaded into the first models folder when no .gguf is found there ("" = never download)
+    #[arg(long, env = "LAIR_DEFAULT_MODEL", default_value = DEFAULT_MODEL)]
+    default_model: String,
 }
+
+const DEFAULT_MODEL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf";
 
 fn parse_reasoning(s: &str) -> Result<Reasoning, String> {
     serde_json::from_value(serde_json::Value::String(s.into())).map_err(|_| "expected none, low or high".into())
 }
 
 impl ModelArgs {
+    /// Without `-m`, models live in `<data>/models`, created on first use.
+    fn resolve(&mut self, data: &std::path::Path) -> Result<()> {
+        if self.models.is_empty() {
+            self.models.push(models_dir(Some(data.join("models")))?);
+        }
+        Ok(())
+    }
+
+    /// First run with an empty models folder: download `default_model` so lair starts with something to chat with.
+    async fn ensure_model(&self) -> Result<()> {
+        let mut found = Vec::new();
+        for p in &self.models {
+            let _ = engine::collect_gguf(p, &mut found);
+        }
+        if !found.is_empty() || self.default_model.is_empty() {
+            return Ok(());
+        }
+        let dir = self.models.iter().find(|p| p.is_dir()).context("no .gguf found and no models folder to download one into")?;
+        eprintln!("no models in {}; downloading the default one", dir.display());
+        download(&self.default_model, dir).await.map(drop)
+    }
+
     fn load(&self) -> Result<(Engine, Params)> {
         let engine = Engine::new(&self.models, self.gpu_layers, self.ctx)?;
         for m in engine.models() {
@@ -172,6 +216,47 @@ impl ModelArgs {
     }
 }
 
+/// `dir`, or `<data>/models` by default; created if missing.
+fn models_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
+    let dir = dir.map_or_else(|| default_data_dir().map(|d| d.join("models")), Ok)?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Downloads a .gguf into `dir`, showing progress. Saved as `.part` and renamed only when complete,
+/// so an interrupted download never looks like a model.
+async fn download(url: &str, dir: &std::path::Path) -> Result<PathBuf> {
+    let name = url.split(['?', '#']).next().unwrap_or(url).rsplit('/').next().filter(|n| n.ends_with(".gguf")).context("the URL must point to a .gguf file")?;
+    let (dest, part) = (dir.join(name), dir.join(format!("{name}.part")));
+    // No overall timeout: the file is gigabytes; only connecting is bounded.
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .user_agent(concat!("lair/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    eprintln!("downloading {url}");
+    let mut resp = http.get(url).send().await.and_then(|r| r.error_for_status()).with_context(|| format!("downloading {url}"))?;
+    let total = resp.content_length().unwrap_or(0);
+    let mut file = tokio::fs::File::create(&part)
+        .await
+        .with_context(|| format!("{} is not writable; put a .gguf in it or mount it with write access", dir.display()))?;
+    let (mut done, mut shown) = (0u64, 0u64);
+    while let Some(chunk) = resp.chunk().await.with_context(|| format!("downloading {url}"))? {
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+        done += chunk.len() as u64;
+        if total > 0 && done * 20 / total > shown {
+            shown = done * 20 / total;
+            eprintln!("  {}% of {} MB", shown * 5, total / 1_000_000);
+        }
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file).await?;
+    if total > 0 && done != total {
+        anyhow::bail!("download ended early ({done} of {total} bytes); run it again to retry");
+    }
+    tokio::fs::rename(&part, &dest).await?;
+    eprintln!("saved {}", dest.display());
+    Ok(dest)
+}
+
 fn default_data_dir() -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_DATA_HOME") {
         Some(d) => PathBuf::from(d),
@@ -183,11 +268,34 @@ fn default_data_dir() -> Result<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Chat { model, system } => {
+        Cmd::Chat { name, mut model, system } => {
+            model.resolve(&default_data_dir()?)?;
+            model.ensure_model().await?;
             let (mut engine, params) = model.load()?;
-            tokio::task::block_in_place(|| chat::run(&mut engine, params, system))
+            let id = match &name {
+                Some(n) => engine.models().iter().find(|m| m.id.contains(n.as_str())).with_context(|| format!("no model matching {n:?}; see `lair list`"))?,
+                None => &engine.models()[0],
+            }
+            .id
+            .clone();
+            tokio::task::block_in_place(|| chat::run(&mut engine, &id, params, system))
         }
-        Cmd::Serve { model, skills, host, port, token, data, workspace, searxng, network } => {
+        Cmd::Pull { url, models } => download(&url, &models_dir(models)?).await.map(drop),
+        Cmd::List { models } => {
+            let dir = models_dir(models)?;
+            let mut found = Vec::new();
+            engine::collect_gguf(&dir, &mut found)?;
+            found.sort();
+            for path in &found {
+                let size = std::fs::metadata(path).map_or(0, |m| m.len());
+                println!("{:<48} {:>6.1} GB", path.strip_prefix(&dir).unwrap_or(path).display(), size as f64 / 1e9);
+            }
+            if found.is_empty() {
+                eprintln!("no models in {}; `lair pull <url>` downloads one, or `lair serve` fetches a default", dir.display());
+            }
+            Ok(())
+        }
+        Cmd::Serve { mut model, skills, host, port, token, data, workspace, searxng, network } => {
             if token.is_none() && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
                 eprintln!("warning: serving on {host} without --token; anyone who can reach it can use it");
             }
@@ -196,6 +304,8 @@ async fn main() -> Result<()> {
             for dir in [&data, &workspace] {
                 std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
+            model.resolve(&data)?;
+            model.ensure_model().await?;
             let (engine, defaults) = model.load()?;
             let http = agent::tools::http_client();
             let peers = Arc::new(network.peers(port, http.clone()).await);
@@ -215,5 +325,47 @@ async fn main() -> Result<()> {
             };
             server::run(lair, token, format!("{host}:{port}")).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(dir: &std::path::Path, url: &str) -> ModelArgs {
+        match Cli::parse_from(["lair", "chat", "-m", dir.to_str().unwrap(), "--default-model", url]).cmd {
+            Cmd::Chat { model, .. } => model,
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_model_is_only_fetched_into_an_empty_folder() {
+        let dir = std::env::temp_dir().join(format!("lair-ensure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Empty and downloads switched off: nothing to do.
+        assert!(args(&dir, "").ensure_model().await.is_ok());
+        // Empty and the URL isn't a .gguf: refused before any request.
+        assert!(args(&dir, "http://invalid.invalid/model.bin").ensure_model().await.is_err());
+        // A model is already there: the unreachable URL is never tried.
+        std::fs::write(dir.join("m.gguf"), b"x").unwrap();
+        assert!(args(&dir, "http://invalid.invalid/model.gguf").ensure_model().await.is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_m_models_live_in_the_data_folder() {
+        let data = std::env::temp_dir().join(format!("lair-data-{}", std::process::id()));
+        let mut model = match Cli::parse_from(["lair", "run", "qwen"]).cmd {
+            Cmd::Chat { name, model, .. } => {
+                assert_eq!(name.as_deref(), Some("qwen"));
+                model
+            }
+            _ => unreachable!(),
+        };
+        model.resolve(&data).unwrap();
+        assert_eq!(model.models, [data.join("models")]);
+        assert!(data.join("models").is_dir());
+        std::fs::remove_dir_all(&data).unwrap();
     }
 }

@@ -296,7 +296,7 @@ impl Engine {
     }
 }
 
-fn collect_gguf(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+pub(crate) fn collect_gguf(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if path.is_dir() {
         for entry in std::fs::read_dir(path)? {
             collect_gguf(&entry?.path(), out)?;
