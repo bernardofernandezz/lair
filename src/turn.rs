@@ -42,6 +42,8 @@ pub enum Out {
     ToolResult { id: String, status: &'static str, output: String },
     Done { message: i64, finish_reason: &'static str },
     Error(String),
+    /// The server is shutting down; what was generated is saved.
+    Stopped,
 }
 
 impl Out {
@@ -54,6 +56,7 @@ impl Out {
             Out::ToolResult { .. } => "tool_result",
             Out::Done { .. } => "done",
             Out::Error(_) => "error",
+            Out::Stopped => "stopped",
         }
     }
 
@@ -67,6 +70,7 @@ impl Out {
             Out::ToolResult { id, status, output } => json!({ "id": id, "status": status, "output": output }),
             Out::Done { message, finish_reason } => json!({ "message": message, "finish_reason": finish_reason }),
             Out::Error(e) => json!({ "message": e }),
+            Out::Stopped => json!({}),
         }
     }
 }
@@ -76,6 +80,9 @@ impl Out {
 pub async fn run(lair: Arc<Lair>, conv: String, input: Input, out: mpsc::UnboundedSender<Out>) {
     if let Err(e) = run_inner(&lair, &conv, input, &out).await {
         let _ = out.send(Out::Error(format!("{e:#}")));
+    }
+    if *lair.stopping.borrow() {
+        let _ = out.send(Out::Stopped);
     }
 }
 
@@ -165,7 +172,18 @@ impl Step<'_> {
         let mut call = None;
         let mut finish = "stop";
         let mut gone = false;
-        while let Some(event) = rx.recv().await {
+        let mut stopping = self.lair.stopping.subscribe();
+        loop {
+            let event = tokio::select! {
+                event = rx.recv() => match event {
+                    Some(event) => event,
+                    None => break,
+                },
+                _ = stopping.wait_for(|s| *s) => {
+                    gone = true;
+                    break;
+                }
+            };
             let pieces = match event {
                 Event::Thinking(t) => {
                     reasoning.push_str(&t);
@@ -220,9 +238,11 @@ impl Step<'_> {
             Ok(_) if spec.is_none() => ("error", format!("a ferramenta {name} não existe")),
             Ok(_) => {
                 let allowed = if needs_approval {
+                    let mut stopping = self.lair.stopping.subscribe();
                     tokio::select! {
                         d = self.lair.approvals.ask(self.conv, &name, &id) => d.map(|d| d.allow),
                         _ = self.out.closed() => return Ok(Err(Gone)),
+                        _ = stopping.wait_for(|s| *s) => return Ok(Err(Gone)),
                     }
                 } else {
                     Some(true)

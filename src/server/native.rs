@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -104,7 +104,7 @@ async fn send(State(s): S, Path(id): Path<String>, Json(input): Json<turn::Input
     tokio::spawn(turn::run(s.lair.clone(), id, input, tx));
     let events = UnboundedReceiverStream::new(rx)
         .map(|out| Ok::<_, Infallible>(Event::default().event(out.name()).data(out.data().to_string())));
-    Sse::new(events).into_response()
+    Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
 async fn skills(State(s): S) -> Response {
@@ -201,5 +201,5 @@ async fn generate(State(s): S, Json(r): Json<GenerateRequest>) -> Response {
         let (name, data) = peers::frame(&e);
         Ok::<_, Infallible>(Event::default().event(name).data(data.to_string()))
     });
-    Sse::new(events).into_response()
+    Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }

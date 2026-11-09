@@ -211,6 +211,7 @@ async fn main() -> Result<()> {
                 defaults,
                 // ~3 characters per token; half the context for history, half for the reply.
                 history_chars: model.ctx as usize * 3 / 2,
+                stopping: tokio::sync::watch::Sender::new(false),
             };
             server::run(lair, token, format!("{host}:{port}")).await
         }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{self, Sse};
+use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -109,5 +109,5 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         .chain(tokio_stream::once(first).chain(body).map(|v| sse::Event::default().data(v.to_string())))
         .chain(tokio_stream::once(sse::Event::default().data("[DONE]")))
         .map(Ok::<_, Infallible>);
-    Sse::new(events).into_response()
+    Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }

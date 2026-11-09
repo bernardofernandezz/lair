@@ -24,4 +24,6 @@ pub struct Lair {
     pub defaults: Params,
     /// Rough size, in characters, of the history a prompt may carry; the rest of the context is for the reply.
     pub history_chars: usize,
+    /// Flips to `true` when the server is shutting down, so running turns save what they have and end.
+    pub stopping: tokio::sync::watch::Sender<bool>,
 }

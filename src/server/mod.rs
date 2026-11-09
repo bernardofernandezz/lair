@@ -47,11 +47,32 @@ pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Res
         .route_layer(auth.clone())
         .fallback(no_route);
     let native = native::routes().route_layer(auth).fallback(no_route);
+    let lair = state.lair.clone();
     let app = Router::new().nest("/v1", v1).nest("/lair/v1", native).fallback(web_ui).with_state(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    let stop = async move {
+        shutdown().await;
+        // Running turns save what they generated and close their streams.
+        lair.stopping.send_replace(true);
+    };
+    let server = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(stop);
+    tokio::select! {
+        r = server => r?,
+        // Other streams (a peer's generation, keep-alives) don't end on their own; don't wait on them long.
+        _ = async { shutdown().await; tokio::time::sleep(std::time::Duration::from_secs(3)).await } => {}
+    }
     Ok(())
+}
+
+/// Resolves on Ctrl+C or SIGTERM, which is what `docker stop` sends.
+async fn shutdown() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler installs");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+    println!("shutting down");
 }
 
 /// With a token set, a request needs it, unless it comes from a machine in this node's tailnet.
