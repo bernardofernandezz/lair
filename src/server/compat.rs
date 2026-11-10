@@ -4,17 +4,17 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use serde_json::{Value, json};
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use super::{error, now, AppState};
+use super::{AppState, error, now};
 use crate::engine::{Event, Finish, Msg, Params, Reasoning};
 
 #[derive(Deserialize)]

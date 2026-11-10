@@ -147,11 +147,7 @@ struct SkillArgs {
 impl SkillArgs {
     /// Skills created or installed here live in `<data>/skills`.
     fn catalog(&self, data: &std::path::Path) -> Catalog {
-        if self.no_skills {
-            Catalog::default()
-        } else {
-            Catalog::load(self.skills_dir.clone(), data.join("skills"))
-        }
+        if self.no_skills { Catalog::default() } else { Catalog::load(self.skills_dir.clone(), data.join("skills")) }
     }
 }
 

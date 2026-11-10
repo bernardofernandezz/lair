@@ -5,10 +5,10 @@
 
 use std::io::{Cursor, Read};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{slug, Manifest};
+use super::{Manifest, slug};
 
 /// A zip for one skill.
 const ZIP_LIMIT: usize = 1024 * 1024;

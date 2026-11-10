@@ -25,7 +25,11 @@ pub fn download_client() -> reqwest::Client {
 }
 
 /// The body of `url`, up to `limit` bytes; `true` when it was longer and got cut there.
-pub async fn get_capped(http: &reqwest::Client, url: &str, limit: usize) -> Result<(reqwest::header::HeaderMap, Vec<u8>, bool)> {
+pub async fn get_capped(
+    http: &reqwest::Client,
+    url: &str,
+    limit: usize,
+) -> Result<(reqwest::header::HeaderMap, Vec<u8>, bool)> {
     let mut resp = http.get(url).send().await?.error_for_status()?;
     let headers = resp.headers().clone();
     let mut body = Vec::new();

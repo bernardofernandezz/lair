@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::engine::{Event, ModelEntry, Msg, Params};
@@ -155,11 +155,7 @@ impl Peers {
     }
 
     fn base(&self, host: &str) -> String {
-        if host.contains(':') {
-            format!("http://{host}")
-        } else {
-            format!("http://{host}:{}", self.port)
-        }
+        if host.contains(':') { format!("http://{host}") } else { format!("http://{host}:{}", self.port) }
     }
 
     /// Models on other nodes, named `model@node`.

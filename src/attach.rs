@@ -5,7 +5,7 @@
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::store::Attachment;
@@ -21,9 +21,9 @@ pub struct Types {
 
 pub const TYPES: Types = Types {
     documents: &[
-        "pdf", "txt", "log", "md", "markdown", "rst", "csv", "tsv", "json", "json5", "xml", "yml", "yaml", "toml", "ini",
-        "html", "svg", "c", "h", "cpp", "hpp", "cc", "cs", "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt", "rb",
-        "php", "lua", "sh", "bash", "zsh", "fish", "sql", "css",
+        "pdf", "txt", "log", "md", "markdown", "rst", "csv", "tsv", "json", "json5", "xml", "yml", "yaml", "toml",
+        "ini", "html", "svg", "c", "h", "cpp", "hpp", "cc", "cs", "rs", "py", "js", "jsx", "ts", "tsx", "go", "java",
+        "kt", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "sql", "css",
     ],
     images: &["png", "jpg", "jpeg", "webp", "gif", "bmp"],
 };
@@ -131,7 +131,10 @@ pub fn sections(docs: &[(&Attachment, &str)]) -> String {
         if text.is_empty() {
             out.push_str(&format!("<anexo nome=\"{name}\" caminho=\"{path}\" texto=\"vazio\">\n</anexo>\n\n"));
         } else {
-            out.push_str(&format!("<anexo nome=\"{name}\" caminho=\"{path}\" caracteres=\"{}\">\n{text}\n</anexo>\n\n", a.chars));
+            out.push_str(&format!(
+                "<anexo nome=\"{name}\" caminho=\"{path}\" caracteres=\"{}\">\n{text}\n</anexo>\n\n",
+                a.chars
+            ));
         }
     }
     out.push_str("Documento(s) anexado(s): use-os para responder. O agente também pode abrir os arquivos originais no workspace.\n\n");

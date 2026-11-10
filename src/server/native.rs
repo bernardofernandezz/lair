@@ -5,23 +5,23 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use super::{bad, missing, settings, sse, ApiResult, AppState};
+use super::{ApiResult, AppState, bad, missing, settings, sse};
 use crate::agent::Decision;
 use crate::attach;
 use crate::engine::{Msg, Params};
 use crate::peers::NodeInfo;
-use crate::skills::{install, slug, Manifest, Skill};
+use crate::skills::{Manifest, Skill, install, slug};
 use crate::store::{Conversation, Hit, Settings};
 use crate::turn;
 
@@ -209,7 +209,11 @@ async fn skills_index(State(s): S) -> ApiResult<Json<Value>> {
 
 /// Who this node is and which models it runs, for other nodes on the tailnet.
 async fn node(State(s): S) -> Json<NodeInfo> {
-    Json(NodeInfo { name: s.lair.node_name(), version: env!("CARGO_PKG_VERSION").into(), models: s.lair.models.local() })
+    Json(NodeInfo {
+        name: s.lair.node_name(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        models: s.lair.models.local(),
+    })
 }
 
 #[derive(Deserialize)]

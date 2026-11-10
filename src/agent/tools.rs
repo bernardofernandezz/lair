@@ -4,9 +4,9 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::jail;
 use crate::lair::Lair;
@@ -176,9 +176,7 @@ pub async fn run(lair: &Lair, tool: Tool, args: &Value) -> Result<String> {
         Tool::ListDir => list_dir(ws, str_arg(args, "path").unwrap_or(".")),
         Tool::ReadFile => read_file(ws, req(args, "path")?),
         Tool::WriteFile => write_file(ws, req(args, "path")?, req(args, "content")?),
-        Tool::EditFile => {
-            edit_file(ws, req(args, "path")?, req(args, "find")?, str_arg(args, "replace").unwrap_or(""))
-        }
+        Tool::EditFile => edit_file(ws, req(args, "path")?, req(args, "find")?, str_arg(args, "replace").unwrap_or("")),
         Tool::DeleteFile => {
             std::fs::remove_file(jail::existing(ws, req(args, "path")?)?)?;
             Ok("apagado".into())
@@ -243,11 +241,7 @@ fn list_dir(ws: &Path, path: &str) -> Result<String> {
         .flatten()
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if e.path().is_dir() {
-                format!("{name}/")
-            } else {
-                name
-            }
+            if e.path().is_dir() { format!("{name}/") } else { name }
         })
         .collect();
     names.sort();

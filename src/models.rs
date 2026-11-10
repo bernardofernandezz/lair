@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::engine::{Engine, Event, ModelEntry, ModelInfo, Msg, Params, Part};
 use crate::peers::Peers;

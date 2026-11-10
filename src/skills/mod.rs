@@ -12,10 +12,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{with_system, Msg};
+use crate::engine::{Msg, with_system};
 use crate::store::Named;
 
 const BUILTINS: &[(&str, &str, &str)] =
@@ -208,18 +208,11 @@ impl Skill {
 
 /// A valid skill id made from any name: lowercase ASCII words joined by hyphens.
 pub fn slug(name: &str) -> String {
-    let words: String = normalize(name)
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
-        .collect();
+    let words: String = normalize(name).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' }).collect();
     let id = words.split_whitespace().collect::<Vec<_>>().join("-");
     let id: String = id.chars().take(64).collect();
     let id = id.trim_end_matches('-').to_owned();
-    if id.is_empty() {
-        "skill".to_owned()
-    } else {
-        id
-    }
+    if id.is_empty() { "skill".to_owned() } else { id }
 }
 
 fn valid_id(id: &str) -> bool {

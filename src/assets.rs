@@ -81,11 +81,7 @@ fn scan(root: &Path, dir: &Path, out: &mut Vec<String>) {
             continue;
         }
         let Ok(rel) = canon.strip_prefix(root) else { continue };
-        let id = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/");
+        let id = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
         if out.contains(&id) {
             eprintln!("assets: {id} exists in two roots; using the first");
             continue;

@@ -2,14 +2,14 @@ use std::cell::Cell;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
-use llama_cpp_2::context::params::LlamaContextParams;
+use anyhow::{Context, Result, anyhow, bail};
 use llama_cpp_2::context::LlamaContext;
+use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
-use llama_cpp_2::mtmd::{mtmd_default_marker, MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText};
+use llama_cpp_2::mtmd::{MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use serde::{Deserialize, Serialize};
@@ -423,11 +423,7 @@ fn projector_for(model: &Path, models: &[PathBuf], projectors: &[PathBuf]) -> Op
     let stem = model.file_stem()?.to_string_lossy().to_ascii_lowercase();
     // `Qwen2.5-VL-3B-Q4_K_M` → `qwen2.5-vl-3b`: projectors don't carry the weights' quantization.
     let base = stem.rsplit_once(['-', '.']).map_or(stem.as_str(), |(b, q)| {
-        if q.starts_with('q') || q.starts_with("f16") || q.starts_with("bf16") {
-            b
-        } else {
-            stem.as_str()
-        }
+        if q.starts_with('q') || q.starts_with("f16") || q.starts_with("bf16") { b } else { stem.as_str() }
     });
     let named =
         here.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains(base)));

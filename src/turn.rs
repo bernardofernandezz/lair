@@ -7,14 +7,14 @@ use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::agent::{self, tools, CallSplit, Piece};
+use crate::agent::{self, CallSplit, Piece, tools};
 use crate::attach::{self, Content};
-use crate::engine::{with_system, Event, Finish, Msg, Params, Reasoning};
+use crate::engine::{Event, Finish, Msg, Params, Reasoning, with_system};
 use crate::lair::Lair;
 use crate::store::{Message, Named, Ref, Settings, ToolStatus, ToolStep};
 
@@ -47,13 +47,33 @@ pub struct Attach {
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Out {
     Skill(Named),
-    Thinking { text: String },
-    Answer { text: String },
+    Thinking {
+        text: String,
+    },
+    Answer {
+        text: String,
+    },
     /// The agent wants a tool. With `needs_approval`, it waits for `POST /lair/v1/approvals/{id}`.
-    ToolCall { id: String, name: String, label: String, subject: String, arguments: Value, needs_approval: bool },
-    ToolResult { id: String, status: ToolStatus, output: String },
-    Done { message: i64, finish_reason: Finish },
-    Error { message: String },
+    ToolCall {
+        id: String,
+        name: String,
+        label: String,
+        subject: String,
+        arguments: Value,
+        needs_approval: bool,
+    },
+    ToolResult {
+        id: String,
+        status: ToolStatus,
+        output: String,
+    },
+    Done {
+        message: i64,
+        finish_reason: Finish,
+    },
+    Error {
+        message: String,
+    },
     /// The server is shutting down; what was generated is saved.
     Stopped {},
 }
@@ -93,11 +113,8 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
         }
     }
     // Attachments load before anything is saved, so a wrong id cannot half-write the question.
-    let loaded = input
-        .attachments
-        .iter()
-        .map(|a| attach::load(&lair.workspace, &a.id, &a.name))
-        .collect::<Result<Vec<_>>>()?;
+    let loaded =
+        input.attachments.iter().map(|a| attach::load(&lair.workspace, &a.id, &a.name)).collect::<Result<Vec<_>>>()?;
     let (mut docs, mut images) = (Vec::new(), Vec::new());
     for l in &loaded {
         match &l.content {
@@ -256,7 +273,8 @@ impl Step<'_> {
         };
         let spec = tools::spec(&name);
         let label = spec.map_or(name.as_str(), |s| s.label).to_owned();
-        let subject = spec.and_then(|s| arguments.get(s.subject)).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let subject =
+            spec.and_then(|s| arguments.get(s.subject)).and_then(Value::as_str).unwrap_or_default().to_owned();
         let needs_approval = spec.is_some_and(|s| s.needs_approval) && !self.lair.approvals.allowed(self.conv, &name);
         let shown = Out::ToolCall {
             id: id.clone(),
@@ -317,7 +335,8 @@ impl Step<'_> {
         if content.is_empty() && reasoning.is_none() {
             return Ok(0);
         }
-        let reply = Message { role: "assistant".into(), content, reasoning, skill: self.skill.take(), ..Default::default() };
+        let reply =
+            Message { role: "assistant".into(), content, reasoning, skill: self.skill.take(), ..Default::default() };
         self.lair.store.append(self.conv, &reply)
     }
 }

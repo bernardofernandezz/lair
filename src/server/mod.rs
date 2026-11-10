@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
-use axum::response::{sse as axum_sse, IntoResponse, Response};
+use axum::response::{IntoResponse, Response, sse as axum_sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_embed::RustEmbed;

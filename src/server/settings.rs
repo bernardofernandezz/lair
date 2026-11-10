@@ -7,9 +7,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::{bad, ApiResult, AppState};
+use super::{ApiResult, AppState, bad};
 
 type S = State<Arc<AppState>>;
 

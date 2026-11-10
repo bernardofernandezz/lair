@@ -1,7 +1,7 @@
 //! Runtime settings. The command line and the settings UI write the same [`Config`]; the live one is
 //! the flags laid over what the UI saved, so a flag wins until lair restarts without it.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -143,7 +143,10 @@ mod tests {
     fn a_patch_changes_only_what_it_names() {
         let saved = Config { searxng: Some("http://s".into()), trust_tailnet: Some(false), ..Default::default() };
         let c = saved.patched(serde_json::json!({ "name": "doom", "trustTailnet": true })).unwrap();
-        assert_eq!((c.searxng.as_deref(), c.name.as_deref(), c.trust_tailnet), (Some("http://s"), Some("doom"), Some(true)));
+        assert_eq!(
+            (c.searxng.as_deref(), c.name.as_deref(), c.trust_tailnet),
+            (Some("http://s"), Some("doom"), Some(true))
+        );
         let cleared = c.patched(serde_json::json!({ "searxng": "", "name": null })).unwrap();
         assert_eq!((cleared.searxng, cleared.name), (None, None));
         assert!(c.patched(serde_json::json!({ "reasoning": "max" })).is_err(), "unknown values are refused");
@@ -151,7 +154,10 @@ mod tests {
 
     #[test]
     fn saved_json_keeps_its_names() {
-        let c: Config = serde_json::from_str(r#"{"searxng":"http://s","skillsIndex":"http://i","reasoning":"low","trustTailnet":false}"#).unwrap();
+        let c: Config = serde_json::from_str(
+            r#"{"searxng":"http://s","skillsIndex":"http://i","reasoning":"low","trustTailnet":false}"#,
+        )
+        .unwrap();
         assert_eq!(c.skills_index.as_deref(), Some("http://i"));
         assert_eq!(c.reasoning, Some(Reasoning::Light));
         assert_eq!(serde_json::to_value(&c).unwrap()["trustTailnet"], false);

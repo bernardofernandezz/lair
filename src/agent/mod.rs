@@ -36,7 +36,10 @@ pub enum Piece {
     Text(String),
     /// A complete call; generation should stop here. `raw` is exactly what the model wrote, which is
     /// what goes back into its history so later turns see calls in the model's own format.
-    Call { raw: String, parsed: Result<Call, String> },
+    Call {
+        raw: String,
+        parsed: Result<Call, String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,7 +83,11 @@ impl CallSplit {
                 }
                 None => {}
             }
-            let first = self.openers.iter().filter_map(|(o, s)| self.pending.find(o.as_str()).map(|i| (i, o.len(), *s))).min_by_key(|&(i, len, _)| (i, len));
+            let first = self
+                .openers
+                .iter()
+                .filter_map(|(o, s)| self.pending.find(o.as_str()).map(|i| (i, o.len(), *s)))
+                .min_by_key(|&(i, len, _)| (i, len));
             match first {
                 Some((start, len, syntax)) => {
                     if start > 0 {
@@ -112,7 +119,9 @@ impl CallSplit {
     pub fn finish(&mut self) -> Option<Piece> {
         let rest = std::mem::take(&mut self.pending);
         match self.inside.take() {
-            Some(Syntax::Hermes) => Some(Piece::Call { parsed: parse_json(&rest), raw: format!("{OPEN}{rest}{CLOSE}") }),
+            Some(Syntax::Hermes) => {
+                Some(Piece::Call { parsed: parse_json(&rest), raw: format!("{OPEN}{rest}{CLOSE}") })
+            }
             Some(Syntax::Python) => {
                 let body = rest.trim_end().trim_end_matches(']');
                 Some(Piece::Call { parsed: parse_python(body), raw: format!("[{body}]") })
@@ -129,7 +138,8 @@ fn parse_json(body: &str) -> Result<Call, String> {
         #[serde(default)]
         arguments: Value,
     }
-    let raw: Raw = serde_json::from_str(body.trim()).map_err(|e| format!("a chamada não é JSON válido ({e}): {}", body.trim()))?;
+    let raw: Raw =
+        serde_json::from_str(body.trim()).map_err(|e| format!("a chamada não é JSON válido ({e}): {}", body.trim()))?;
     let arguments = if raw.arguments.is_null() { Value::Object(Default::default()) } else { raw.arguments };
     Ok(Call { name: raw.name, arguments })
 }
@@ -255,7 +265,12 @@ impl Py {
                     "True" | "true" => Ok(Value::Bool(true)),
                     "False" | "false" => Ok(Value::Bool(false)),
                     "None" | "null" => Ok(Value::Null),
-                    w => w.parse::<f64>().ok().and_then(|n| serde_json::Number::from_f64(n)).map(Value::Number).ok_or(format!("valor desconhecido {w:?}")),
+                    w => w
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(|n| serde_json::Number::from_f64(n))
+                        .map(Value::Number)
+                        .ok_or(format!("valor desconhecido {w:?}")),
                 }
             }
         }
@@ -336,7 +351,12 @@ mod tests {
 
     #[test]
     fn a_call_split_across_tokens_is_found_after_its_text() {
-        let out = run(&["Vou olhar. <to", "ol_call>{\"name\":\"list_dir\",", "\"arguments\":{\"path\":\".\"}}</tool", "_call>"]);
+        let out = run(&[
+            "Vou olhar. <to",
+            "ol_call>{\"name\":\"list_dir\",",
+            "\"arguments\":{\"path\":\".\"}}</tool",
+            "_call>",
+        ]);
         assert_eq!(out[0], Piece::Text("Vou olhar. ".into()));
         assert_eq!(parsed(&out[1]), &call("list_dir", serde_json::json!({"path": "."})));
         assert_eq!(out.len(), 2);
@@ -361,11 +381,20 @@ mod tests {
     fn pythonic_calls_are_found_and_parsed() {
         let out = run(&["Ok. [list_d", "ir(path='.')]", " resto"]);
         assert_eq!(out[0], Piece::Text("Ok. ".into()));
-        assert_eq!(out[1], Piece::Call { raw: "[list_dir(path='.')]".into(), parsed: call("list_dir", serde_json::json!({"path": "."})) });
+        assert_eq!(
+            out[1],
+            Piece::Call {
+                raw: "[list_dir(path='.')]".into(),
+                parsed: call("list_dir", serde_json::json!({"path": "."}))
+            }
+        );
         let out = run(&[r#"[write_file(path="a b.md", content='linha 1\nit\'s (ok)', n=2, ok=True)]"#]);
         assert_eq!(
             parsed(&out[0]),
-            &call("write_file", serde_json::json!({"path": "a b.md", "content": "linha 1\nit's (ok)", "n": 2.0, "ok": true}))
+            &call(
+                "write_file",
+                serde_json::json!({"path": "a b.md", "content": "linha 1\nit's (ok)", "n": 2.0, "ok": true})
+            )
         );
     }
 

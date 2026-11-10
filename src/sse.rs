@@ -2,9 +2,9 @@
 //! `data`; a frame's event name is the tag and its data is the payload, so a frame reads back into the
 //! same enum.
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 
 /// The event name and data line for one stream item.
 pub fn frame(item: &impl Serialize) -> (String, String) {

@@ -2,7 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// `rel` must be relative and made only of plain names: no `..`, no root, no NUL.
 fn lexical(root: &Path, rel: &str) -> Result<PathBuf> {
