@@ -1,5 +1,6 @@
 # On every version tag (git tag v0.1.0 && git push --tags): the binaries install.sh downloads, and the
-# images compose.yaml pulls.
+# images compose.yaml pulls. The release stays a draft until SHA256SUMS is up: /releases/latest skips
+# drafts, so install.sh and `lair update` never see a release they can't verify.
 name: release
 
 on:
@@ -16,6 +17,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   # `lair update` compares the binary's version to the tag, so they must agree; checked once, before any build.
   check:
     runs-on: ubuntu-latest
@@ -23,8 +27,18 @@ jobs:
       - uses: actions/checkout@v4
       - run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml || { echo "Cargo.toml version doesn't match tag $GITHUB_REF_NAME"; exit 1; }
 
+  # One job creates the draft, so the binary jobs can't race to create it; notes come from the commits.
+  draft:
+    needs: [ci, check]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --draft --generate-notes --verify-tag
+
   binaries:
-    needs: check
+    needs: draft
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -55,12 +69,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
       - run: tar -czf ${{ matrix.asset }}.tar.gz -C target/release lair
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ matrix.asset }}.tar.gz
+      - run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }}.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: gh release download "$GITHUB_REF_NAME" --pattern '*.tar.gz'
+      - run: sha256sum *.tar.gz | tee SHA256SUMS
+      - run: gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
+      - run: gh release edit "$GITHUB_REF_NAME" --draft=false
 
   image:
-    needs: check
+    needs: [ci, check]
     timeout-minutes: 90
     runs-on: ubuntu-latest
     strategy:
