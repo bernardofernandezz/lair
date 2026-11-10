@@ -36,7 +36,11 @@ echo "Downloading $asset..."
 mkdir -p "$dir"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-curl -fL --progress-bar "$url" -o "$tmp/lair.tar.gz"
+curl -fL --progress-bar "$url" -o "$tmp/lair.tar.gz" || {
+  echo "Couldn't download $asset from the latest release." >&2
+  echo "Check https://github.com/$repo/releases, or build from source." >&2
+  exit 1
+}
 tar -xzf "$tmp/lair.tar.gz" -C "$tmp"
 mv "$tmp/lair" "$dir/lair"
 chmod +x "$dir/lair"
