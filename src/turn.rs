@@ -70,6 +70,8 @@ pub enum Out {
     Done {
         message: i64,
         finish_reason: Finish,
+        /// Prompt and reply tokens of the last generation: how full the context is.
+        tokens: usize,
     },
     Error {
         message: String,
@@ -153,7 +155,7 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
         let _ = out.send(Out::Skill(s.clone()));
     }
 
-    let mut step = Step { lair, conv, out, skill };
+    let mut step = Step { lair, conv, out, skill, tokens: 0 };
     for _ in 0..agent::MAX_STEPS {
         match step.generate(&model, prompt.clone(), params, c.agent).await? {
             Err(Gone) => return Ok(()),
@@ -196,6 +198,8 @@ struct Step<'a> {
     conv: &'a str,
     out: &'a mpsc::UnboundedSender<Out>,
     skill: Option<Named>,
+    /// Context used by the last generation.
+    tokens: usize,
 }
 
 impl Step<'_> {
@@ -235,6 +239,7 @@ impl Step<'_> {
                 Event::Answer { text } => vec![Piece::Text(text)],
                 Event::Done(done) => {
                     finish = done.finish_reason;
+                    self.tokens = done.prompt_tokens + done.completion_tokens;
                     split.finish().into_iter().collect()
                 }
                 Event::Failed { message } => bail!(message),
@@ -326,7 +331,7 @@ impl Step<'_> {
 
     fn finish(&mut self, text: String, reasoning: Option<String>, finish: Finish) -> Result<()> {
         let message = self.save(text, reasoning)?;
-        let _ = self.out.send(Out::Done { message, finish_reason: finish });
+        let _ = self.out.send(Out::Done { message, finish_reason: finish, tokens: self.tokens });
         Ok(())
     }
 

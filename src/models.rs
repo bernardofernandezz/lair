@@ -11,6 +11,7 @@ pub struct Models {
     // One model on one GPU: run requests one at a time.
     engine: Arc<Mutex<Engine>>,
     local: Vec<ModelInfo>,
+    ctx: u32,
     /// Model in memory after the last generation; readable while the engine is busy.
     loaded: Arc<std::sync::Mutex<Option<String>>>,
     peers: Arc<Peers>,
@@ -18,7 +19,13 @@ pub struct Models {
 
 impl Models {
     pub fn new(engine: Engine, peers: Arc<Peers>) -> Self {
-        Self { local: engine.models().to_vec(), engine: Arc::new(Mutex::new(engine)), loaded: Arc::default(), peers }
+        Self {
+            local: engine.models().to_vec(),
+            ctx: engine.ctx(),
+            engine: Arc::new(Mutex::new(engine)),
+            loaded: Arc::default(),
+            peers,
+        }
     }
 
     /// Models on this machine only: what peers see of this node.
@@ -32,6 +39,8 @@ impl Models {
                 thinks: m.thinks,
                 loaded: loaded.as_deref() == Some(m.id.as_str()),
                 vision: m.mmproj.is_some(),
+                size: std::fs::metadata(&m.path).map_or(0, |f| f.len()),
+                ctx: self.ctx,
             })
             .collect()
     }

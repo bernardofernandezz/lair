@@ -264,7 +264,15 @@ mod tests {
         let info = NodeInfo {
             name: "doom".into(),
             version: "0.1.0".into(),
-            models: vec![ModelEntry { id: "qwen".into(), node: None, thinks: true, loaded: false, vision: false }],
+            models: vec![ModelEntry {
+                id: "qwen".into(),
+                node: None,
+                thinks: true,
+                loaded: false,
+                vision: false,
+                size: 0,
+                ctx: 0,
+            }],
         };
         *p.nodes.write().unwrap() = vec![Node { info, base: "http://doom:8080".into() }];
         assert_eq!(p.models()[0].id, "qwen@doom");

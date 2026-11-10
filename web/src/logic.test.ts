@@ -42,3 +42,32 @@ test("fromStored groups the assistant and tool messages after a question into on
   expect(reply.parts.map((p) => p.kind)).toEqual(["text", "tool", "text"]);
   expect(reply.parts[1]).toMatchObject({ kind: "tool", step: { name: "list_dir", status: "ok", output: "a.md" } });
 });
+
+import { groupByNode, quantOf } from "./Controls";
+
+test("quantOf reads the quantization from GGUF file names", () => {
+  expect(quantOf("Qwen3-4B-Q4_K_M")).toBe("Q4_K_M");
+  expect(quantOf("gemma-3-4b-it-q8_0")).toBe("Q8_0");
+  expect(quantOf("Llama-3.2-3B-Instruct-IQ4_XS")).toBe("IQ4_XS");
+  expect(quantOf("model-BF16")).toBe("BF16");
+  expect(quantOf("Qwen3-4B")).toBeNull();
+});
+
+test("groupByNode puts this machine first and keeps each node's order", () => {
+  const m = (id: string, node?: string) => ({ id, node, thinks: false, loaded: false });
+  const groups = groupByNode([m("a@x", "x"), m("b"), m("c@y", "y"), m("d")]);
+  expect(groups.map(([n, ms]) => [n, ms.map((x) => x.id)])).toEqual([
+    [null, ["b", "d"]],
+    ["x", ["a@x"]],
+    ["y", ["c@y"]],
+  ]);
+  expect(groupByNode([m("a@x", "x")]).map(([n]) => n)).toEqual(["x"]);
+});
+
+import { bareName } from "./Controls";
+
+test("bareName drops a trailing quantization only", () => {
+  expect(bareName("Qwen3-4B-Q4_K_M")).toBe("Qwen3-4B");
+  expect(bareName("gemma-3-4b-it-q8_0")).toBe("gemma-3-4b-it");
+  expect(bareName("Qwen3-4B")).toBe("Qwen3-4B");
+});

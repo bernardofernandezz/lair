@@ -137,6 +137,12 @@ pub struct ModelEntry {
     /// Sees images (a projector was found next to it). Peers on older versions don't send it.
     #[serde(default)]
     pub vision: bool,
+    /// File size in bytes, to show and to judge whether it fits; 0 from older peers.
+    #[serde(default)]
+    pub size: u64,
+    /// Context size in tokens it runs with; 0 from older peers.
+    #[serde(default)]
+    pub ctx: u32,
 }
 
 /// The loaded model's one context, reused across generations instead of allocated for each.
@@ -241,6 +247,10 @@ impl Engine {
 
     pub fn models(&self) -> &[ModelInfo] {
         &self.catalog
+    }
+
+    pub fn ctx(&self) -> u32 {
+        self.n_ctx
     }
 
     pub fn loaded(&self) -> Option<&str> {

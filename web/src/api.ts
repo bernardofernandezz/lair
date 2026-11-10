@@ -1,5 +1,6 @@
 /** `node` is the peer machine the model runs on; absent for this one. */
-export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean };
+/** `size` is the file's bytes and `ctx` the context it runs with; both 0 from older peers. */
+export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean; size?: number; ctx?: number };
 
 /** A model's own name: a peer's models are listed as `name@node`. */
 export const modelName = (m: ModelInfo) => (m.node ? m.id.slice(0, -(m.node.length + 1)) : m.id);
@@ -102,7 +103,7 @@ export type TurnEvent =
   | { event: "answer"; data: { text: string } }
   | { event: "tool_call"; data: ToolCall }
   | { event: "tool_result"; data: ToolResult }
-  | { event: "done"; data: { message: number; finish_reason: "stop" | "length" } };
+  | { event: "done"; data: { message: number; finish_reason: "stop" | "length"; tokens?: number } };
 
 export class AuthError extends Error {}
 

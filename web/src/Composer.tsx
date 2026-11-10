@@ -16,7 +16,7 @@ type Props = {
   current: string | null;
   busy: boolean;
   hello: string | false;
-  /** Model picker, reasoning control: shown in the tools row. */
+  /** Agent switch, model chip: shown in the tools row between the paperclip and send. */
   tools: ReactNode;
   /** The chosen model sees images; otherwise they are refused here with the reason. */
   vision: boolean;
@@ -212,7 +212,6 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
         }}
       />
       <div className="tools">
-        {tools}
         <input
           ref={fileInput}
           type="file"
@@ -238,6 +237,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
             <path d="M8 12.5V8a4 4 0 0 1 8 0v8a2.5 2.5 0 0 1-5 0V9.5a1 1 0 0 1 2 0V16" />
           </svg>
         </button>
+        {tools}
         {busy ? (
           <button type="button" className="send" onClick={onStop} aria-label="Parar resposta">
             <svg viewBox="0 0 24 24" aria-hidden>
