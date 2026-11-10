@@ -18,6 +18,9 @@ fn asset() -> Result<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64", not(feature = "cuda"))) {
         return Ok(if cfg!(feature = "vulkan") { "lair-linux-x86_64-vulkan" } else { "lair-linux-x86_64-cpu" });
     }
+    if cfg!(all(target_os = "windows", target_arch = "x86_64", not(feature = "cuda"))) {
+        return Ok(if cfg!(feature = "vulkan") { "lair-windows-x86_64-vulkan" } else { "lair-windows-x86_64-cpu" });
+    }
     bail!("there's no prebuilt release for this build; update it from source ({REPO}#build-from-source)")
 }
 
@@ -36,7 +39,10 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = std::env::current_exe()?;
+    // Through symlinks to the real file. Not on Windows, where canonical paths (`\\?\C:\...`) can't be a
+    // working directory.
+    let exe = if cfg!(windows) { exe } else { exe.canonicalize()? };
     let dir = exe.parent().context("the lair binary has no parent folder")?;
     // Next to the binary, so the final rename stays on one filesystem and replaces it atomically.
     let tmp = dir.join(".lair-update");
@@ -61,14 +67,21 @@ async fn install(http: &reqwest::Client, base: &str, asset: &str, tmp: &Path, ex
     std::fs::create_dir_all(tmp)?;
     let archive = tmp.join("lair.tar.gz");
     std::fs::write(&archive, &body)?;
-    if !Command::new("tar").arg("-xzf").arg(&archive).arg("-C").arg(tmp).status()?.success() {
+    // By its name from inside the folder: GNU tar reads the `C:` of a Windows path as a remote host.
+    if !Command::new("tar").args(["-xzf", "lair.tar.gz"]).current_dir(tmp).status()?.success() {
         bail!("tar couldn't unpack {url}");
     }
-    let new = tmp.join("lair");
+    let new = tmp.join(format!("lair{}", std::env::consts::EXE_SUFFIX));
     // Run it once before swapping, so a binary that can't start here (e.g. too old a glibc) never replaces a working one.
     let ok = Command::new(&new).arg("--version").output().is_ok_and(|o| o.status.success());
     if !ok {
         bail!("the downloaded binary doesn't run on this machine");
+    }
+    if cfg!(windows) {
+        // Windows won't replace a program that is running, but lets it be renamed out of the way.
+        let old = exe.with_extension("exe.old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(exe, &old)?;
     }
     std::fs::rename(&new, exe)?;
     Ok(())
@@ -96,6 +109,7 @@ mod tests {
         assert_eq!(checksum_for(&sums, "lair-linux-x86_64-cpu.tar.gz"), Some(a));
         assert_eq!(checksum_for(&sums, "lair-macos-arm64.tar.gz"), Some("b".repeat(64)));
         assert_eq!(checksum_for(&sums, "lair-linux-x86_64-vulkan.tar.gz"), None);
+        assert_eq!(checksum_for(&sums, "lair-windows-x86_64-cpu.tar.gz"), None, "another system's build");
         assert_eq!(checksum_for(&sums, "cpu.tar.gz"), None, "a suffix is not a match");
         assert_eq!(checksum_for("abc  x.tar.gz", "x.tar.gz"), None, "a short hash is malformed");
     }

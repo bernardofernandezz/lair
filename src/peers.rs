@@ -77,9 +77,18 @@ impl Peers {
         self.nodes.read().unwrap().iter().map(|n| n.info.clone()).collect()
     }
 
+    #[cfg(unix)]
     fn local_api(&self) -> Result<reqwest::Client> {
         let socket = self.socket.as_ref().context("no Tailscale socket")?;
         Ok(reqwest::Client::builder().unix_socket(socket.as_path()).timeout(PROBE_TIMEOUT).build()?)
+    }
+
+    // ponytail: no tailnet discovery on Windows, where tailscaled listens on a named pipe; `--peer` still
+    // works. Talk to the pipe if Windows users ask for discovery.
+    #[cfg(not(unix))]
+    fn local_api(&self) -> Result<reqwest::Client> {
+        self.socket.as_ref().context("no Tailscale socket")?;
+        bail!("tailscaled can't be reached through a socket on this system")
     }
 
     /// This machine as tailscaled sees it, for the settings UI; `None` when tailscaled doesn't answer.

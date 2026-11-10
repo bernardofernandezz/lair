@@ -2,6 +2,7 @@
 # Installs lair into ~/.local/bin (no root needed):
 #   curl -fsSL https://raw.githubusercontent.com/bernardofernandezz/lair/main/install.sh | sh
 # LAIR_INSTALL_DIR changes where it goes; LAIR_VARIANT=cpu|vulkan skips GPU detection on Linux.
+# Native Windows has its own installer, install.ps1.
 set -eu
 
 repo=bernardofernandezz/lair
@@ -11,7 +12,12 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) asset=lair-macos-arm64 ;;
   Linux-x86_64)
     variant=${LAIR_VARIANT:-}
-    if [ -z "$variant" ]; then
+    if [ -z "$variant" ] && grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+      # Vulkan inside WSL is emulated and slower than the CPU; the real GPU is reached from Windows itself.
+      variant=cpu
+      echo "WSL detected: installing the CPU build. To use your GPU, install lair on Windows itself (install.ps1)"
+      echo "or run the CUDA Docker image. See https://github.com/$repo#windows"
+    elif [ -z "$variant" ]; then
       variant=cpu
       # The Vulkan build runs on any GPU with a driver installed, and needs glibc 2.39+ (built on Ubuntu 24.04).
       glibc=$(ldd --version 2>/dev/null | head -n1 | grep -o '[0-9]*\.[0-9]*$' || echo 0.0)

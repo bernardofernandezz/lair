@@ -39,7 +39,10 @@ jobs:
 
   binaries:
     needs: draft
-    timeout-minutes: 30
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +59,12 @@ jobs:
           - asset: lair-macos-arm64
             os: macos-15
             features: metal
+          - asset: lair-windows-x86_64-cpu
+            os: windows-latest
+            features: ""
+          - asset: lair-windows-x86_64-vulkan
+            os: windows-latest
+            features: vulkan
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -66,9 +75,19 @@ jobs:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile && bun run build
         working-directory: web
+      - name: Vulkan SDK
+        if: runner.os == 'Windows' && matrix.features == 'vulkan'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe -OutFile vulkan-sdk.exe
+          Start-Process -Wait .\vulkan-sdk.exe -ArgumentList '--accept-licenses --default-answer --confirm-command install'
+          $sdk = (Get-ChildItem C:\VulkanSDK | Select-Object -First 1).FullName
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          "$sdk\Bin" >> $env:GITHUB_PATH
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
-      - run: tar -czf ${{ matrix.asset }}.tar.gz -C target/release lair
+      # .tar.gz on Windows too: its own tar unpacks it, and `publish` checksums one kind of file.
+      - run: tar -czf ${{ matrix.asset }}.tar.gz -C target/release lair${{ runner.os == 'Windows' && '.exe' || '' }}
       - run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }}.tar.gz --clobber
         env:
           GH_TOKEN: ${{ github.token }}

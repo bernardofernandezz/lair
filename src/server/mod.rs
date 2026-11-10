@@ -77,13 +77,24 @@ pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Res
 
 /// Resolves on Ctrl+C or SIGTERM, which is what `docker stop` sends.
 async fn shutdown() {
-    let mut term =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler installs");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+        _ = terminated() => {}
     }
     println!("shutting down");
+}
+
+#[cfg(unix)]
+async fn terminated() {
+    let mut term =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler installs");
+    term.recv().await;
+}
+
+/// Windows has no SIGTERM: Ctrl+C is the only way to ask it to stop.
+#[cfg(not(unix))]
+async fn terminated() {
+    std::future::pending().await
 }
 
 /// With a token set, a request needs it, unless it comes from a machine in this node's tailnet.

@@ -143,7 +143,8 @@ pub fn hardware() -> Hardware {
     }
 }
 
-// shortcut: reads /proc/meminfo, so RAM is 0 off Linux; Macs run on Metal, whose memory is counted as VRAM.
+// shortcut: reads /proc/meminfo, so RAM is 0 on macOS; Macs run on Metal, whose memory is counted as VRAM.
+#[cfg(not(windows))]
 fn ram_total() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
@@ -151,6 +152,25 @@ fn ram_total() -> u64 {
             m.lines().find_map(|l| l.strip_prefix("MemTotal:")?.trim().strip_suffix("kB")?.trim().parse().ok())
         })
         .map_or(0, |kb: u64| kb * 1024)
+}
+
+#[cfg(windows)]
+fn ram_total() -> u64 {
+    /// Win32's `MEMORYSTATUSEX`; only the total is read.
+    #[repr(C)]
+    struct MemoryStatus {
+        length: u32,
+        _load: u32,
+        total_phys: u64,
+        _rest: [u64; 6],
+    }
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+    }
+    let length = size_of::<MemoryStatus>() as u32;
+    let mut status = MemoryStatus { length, _load: 0, total_phys: 0, _rest: [0; 6] };
+    // SAFETY: `status` is a `MEMORYSTATUSEX` with its length set, which is all the call asks for.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 { status.total_phys } else { 0 }
 }
 
 /// Without a GPU, speed is bound by memory bandwidth: past this much weight replies crawl even if RAM fits.

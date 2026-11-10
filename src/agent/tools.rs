@@ -94,7 +94,11 @@ pub const SPECS: &[Spec] = &[
         name: "run_command",
         label: "Run command",
         subject: "command",
-        usage: r#"runs a shell command in the workspace folder (60 s at most). {"command": "ls -la"}"#,
+        usage: if cfg!(windows) {
+            r#"runs a PowerShell command in the workspace folder (60 s at most). {"command": "Get-ChildItem"}"#
+        } else {
+            r#"runs a shell command in the workspace folder (60 s at most). {"command": "ls -la"}"#
+        },
         needs_approval: true,
     },
     Spec {
@@ -277,8 +281,10 @@ fn edit_file(ws: &Path, path: &str, find: &str, replace: &str) -> Result<String>
 }
 
 async fn run_command(ws: &Path, command: &str) -> Result<String> {
-    let child = tokio::process::Command::new("sh")
-        .arg("-c")
+    let shell = if cfg!(windows) { "powershell" } else { "sh" };
+    let flags: &[&str] = if cfg!(windows) { &["-NoProfile", "-NonInteractive", "-Command"] } else { &["-c"] };
+    let child = tokio::process::Command::new(shell)
+        .args(flags)
         .arg(command)
         .current_dir(ws)
         .stdin(Stdio::null())
@@ -414,7 +420,11 @@ mod tests {
     #[tokio::test]
     async fn commands_run_in_the_workspace_and_report_exit_code_and_stderr() {
         let t = workspace("cmd");
-        let out = run_command(&t, "pwd; echo oops >&2; exit 3").await.unwrap();
+        let script = match cfg!(windows) {
+            true => "(Get-Location).Path; [Console]::Error.WriteLine('oops'); exit 3",
+            false => "pwd; echo oops >&2; exit 3",
+        };
+        let out = run_command(&t, script).await.unwrap();
         assert!(out.starts_with("[exit code 3]"));
         assert!(out.contains(t.file_name().unwrap().to_str().unwrap()));
         assert!(out.contains("[stderr]\noops"));
