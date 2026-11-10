@@ -31,17 +31,32 @@ case "$(uname -s)-$(uname -m)" in
     ;;
 esac
 
-url=https://github.com/$repo/releases/latest/download/$asset.tar.gz
+base=https://github.com/$repo/releases/latest/download
 echo "Downloading $asset..."
 mkdir -p "$dir"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-curl -fL --progress-bar "$url" -o "$tmp/lair.tar.gz" || {
+curl -fL --progress-bar "$base/$asset.tar.gz" -o "$tmp/$asset.tar.gz" || {
   echo "Couldn't download $asset from the latest release." >&2
   echo "Check https://github.com/$repo/releases, or build from source." >&2
   exit 1
 }
-tar -xzf "$tmp/lair.tar.gz" -C "$tmp"
+
+# Every release publishes SHA256SUMS; without it, or on a mismatch, nothing is installed.
+curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || {
+  echo "The latest release has no SHA256SUMS, so the download can't be verified. Nothing was installed." >&2
+  exit 1
+}
+grep "  $asset.tar.gz\$" "$tmp/SHA256SUMS" > "$tmp/expected" || {
+  echo "SHA256SUMS doesn't list $asset.tar.gz. Nothing was installed." >&2
+  exit 1
+}
+if command -v sha256sum >/dev/null 2>&1; then check="sha256sum"; else check="shasum -a 256"; fi
+(cd "$tmp" && $check -c --status expected) || {
+  echo "$asset.tar.gz doesn't match its checksum: the download is corrupted or was tampered with. Nothing was installed." >&2
+  exit 1
+}
+tar -xzf "$tmp/$asset.tar.gz" -C "$tmp"
 mv "$tmp/lair" "$dir/lair"
 chmod +x "$dir/lair"
 

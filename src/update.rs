@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 
 use crate::net;
 
@@ -40,15 +41,23 @@ pub async fn run() -> Result<()> {
     // Next to the binary, so the final rename stays on one filesystem and replaces it atomically.
     let tmp = dir.join(".lair-update");
     println!("Updating lair {current} → {tag} ({asset})...");
-    let result = install(&http, &format!("{REPO}/releases/download/{tag}/{asset}.tar.gz"), &tmp, &exe).await;
+    let result = install(&http, &format!("{REPO}/releases/download/{tag}"), asset, &tmp, &exe).await;
     let _ = std::fs::remove_dir_all(&tmp);
     result.with_context(|| format!("couldn't update {}", exe.display()))?;
     println!("Updated {} to {tag}. Restart any running `lair serve` to use it.", exe.display());
     Ok(())
 }
 
-async fn install(http: &reqwest::Client, url: &str, tmp: &Path, exe: &Path) -> Result<()> {
-    let body = http.get(url).send().await?.error_for_status()?.bytes().await?;
+async fn install(http: &reqwest::Client, base: &str, asset: &str, tmp: &Path, exe: &Path) -> Result<()> {
+    let file = format!("{asset}.tar.gz");
+    let sums = http.get(format!("{base}/SHA256SUMS")).send().await?.error_for_status();
+    let sums = sums.context("this release has no SHA256SUMS, so the download can't be verified")?.text().await?;
+    let expected = checksum_for(&sums, &file).with_context(|| format!("SHA256SUMS doesn't list {file}"))?;
+    let url = format!("{base}/{file}");
+    let body = http.get(&url).send().await?.error_for_status()?.bytes().await?;
+    if format!("{:x}", Sha256::digest(&body)) != expected {
+        bail!("{file} doesn't match its checksum; the download is corrupted or was tampered with");
+    }
     std::fs::create_dir_all(tmp)?;
     let archive = tmp.join("lair.tar.gz");
     std::fs::write(&archive, &body)?;
@@ -63,4 +72,31 @@ async fn install(http: &reqwest::Client, url: &str, tmp: &Path, exe: &Path) -> R
     }
     std::fs::rename(&new, exe)?;
     Ok(())
+}
+
+/// The hash `sha256sum` printed for `file`: lines read `<hex>  <name>` (or `<hex> *<name>` in binary mode).
+fn checksum_for(sums: &str, file: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (hash, name) = line.split_once(char::is_whitespace)?;
+        let name = name.trim_start().trim_start_matches('*');
+        (name == file && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| hash.to_ascii_lowercase())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksums_are_found_by_exact_file_name() {
+        let a = "a".repeat(64);
+        let b = "B".repeat(64);
+        let sums = format!("{a}  lair-linux-x86_64-cpu.tar.gz\n{b} *lair-macos-arm64.tar.gz\nnot a line\n");
+        assert_eq!(checksum_for(&sums, "lair-linux-x86_64-cpu.tar.gz"), Some(a));
+        assert_eq!(checksum_for(&sums, "lair-macos-arm64.tar.gz"), Some("b".repeat(64)));
+        assert_eq!(checksum_for(&sums, "lair-linux-x86_64-vulkan.tar.gz"), None);
+        assert_eq!(checksum_for(&sums, "cpu.tar.gz"), None, "a suffix is not a match");
+        assert_eq!(checksum_for("abc  x.tar.gz", "x.tar.gz"), None, "a short hash is malformed");
+    }
 }
