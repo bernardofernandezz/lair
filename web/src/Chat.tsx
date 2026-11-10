@@ -26,9 +26,11 @@ type Props = {
   onAuthLost: () => void;
   /** Opens the place to download more models. */
   onMoreModels?: () => void;
+  /** Changes when the set of models on disk changed. */
+  modelsKey?: number;
 };
 
-export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onOpen, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost, onMoreModels }: Props) {
+export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onOpen, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost, onMoreModels, modelsKey }: Props) {
   const [models, setModels] = useState(initialModels);
   const [model, setModel] = useState(() => {
     const saved = load("model");
@@ -57,6 +59,9 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
   useEffect(() => onActive(active), [active, onActive]);
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => save("model", model), [model]);
+  useEffect(() => {
+    if (modelsKey) api.models().then(setModels, () => {});
+  }, [api, modelsKey]);
   useEffect(() => save("effort", effort ?? ""), [effort]);
 
   useEffect(() => {

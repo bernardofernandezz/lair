@@ -2242,3 +2242,109 @@ a.ref-chip {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+
+/* Settings → Modelos: hardware, recommendations, Hugging Face search, downloads */
+
+.models-tab {
+  display: grid;
+  gap: 20px;
+}
+
+.models-tab section {
+  display: grid;
+  gap: 8px;
+}
+
+.hw-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--slate);
+  font-size: 14px;
+}
+
+.models-head {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.models-tab .skill-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.models-tab .option-meta {
+  margin-top: 4px;
+}
+
+.skill-list li.is-best {
+  border-color: color-mix(in oklab, var(--teal) 60%, var(--line));
+}
+
+.tag.fit-fits {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--teal) 24%, transparent);
+  color: var(--ink);
+}
+
+.tag.fit-tight {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--gold) 28%, transparent);
+  color: var(--ink);
+}
+
+.tag.fit-no {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--danger) 18%, transparent);
+  color: var(--ink);
+}
+
+.download progress {
+  width: 100%;
+  height: 6px;
+  margin-top: 6px;
+  accent-color: var(--teal);
+}
+
+.repo-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.repo-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: none;
+  text-align: left;
+}
+
+.repo-head:hover,
+.repo-head[aria-expanded="true"] {
+  background: var(--haze);
+}
+
+.repo-files {
+  padding: 8px 0 4px 12px;
+}
+
+.models-tab .skill-actions .solid,
+.models-tab .skill-actions .ghost {
+  padding: 6px 16px;
+  font-size: 14px;
+}

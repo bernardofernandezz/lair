@@ -27,6 +27,8 @@ pub struct Lair {
     /// The folder the agent's tools work in; attachments land there too.
     pub workspace: PathBuf,
     pub approvals: Approvals,
+    /// Models being downloaded from Hugging Face.
+    pub downloads: crate::hub::Downloads,
     /// Generation params from the command line; reasoning comes from [`Config`].
     pub params: Params,
     /// Rough size, in characters, of the history a prompt may carry; the rest of the context is for the reply.

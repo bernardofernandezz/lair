@@ -20,6 +20,7 @@ use super::{ApiResult, AppState, bad, missing, settings, sse};
 use crate::agent::Decision;
 use crate::attach;
 use crate::engine::{Msg, Params};
+use crate::hub;
 use crate::peers::NodeInfo;
 use crate::skills::{Manifest, Skill, install, slug};
 use crate::store::{Conversation, Hit, Settings};
@@ -43,6 +44,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/skills/{id}", put(save_skill).patch(toggle_skill).delete(remove_skill))
         .route("/files", get(file_types).post(upload_file))
         .route("/files/{id}", get(file))
+        .route("/hub/hardware", get(hub_hardware))
+        .route("/hub/suggested", get(hub_suggested))
+        .route("/hub/search", get(hub_search))
+        .route("/hub/files", get(hub_files))
+        .route("/hub/downloads", get(hub_downloads).post(hub_download))
+        .route("/hub/downloads/{file}", axum::routing::delete(hub_cancel))
         .layer(DefaultBodyLimit::max(attach::MAX_UPLOAD + 64 * 1024))
         .merge(settings::routes())
 }
@@ -229,4 +236,90 @@ async fn generate(State(s): S, Json(r): Json<GenerateRequest>) -> Response {
     let rx = s.lair.models.generate_local(&r.model, r.messages, r.params);
     let events = UnboundedReceiverStream::new(rx).map(|e| Ok::<_, Infallible>(sse(&e)));
     Sse::new(events).keep_alive(KeepAlive::default()).into_response()
+}
+
+async fn hub_hardware() -> Json<hub::Hardware> {
+    Json(hub::hardware())
+}
+
+/// The curated repos, each with the file recommended for this machine; `best` marks the most capable
+/// one that runs entirely on it.
+async fn hub_suggested(State(s): S) -> ApiResult<Json<Vec<Value>>> {
+    let hw = hub::hardware();
+    let mut tasks = tokio::task::JoinSet::new();
+    for (i, (repo, about)) in hub::SUGGESTED.iter().enumerate() {
+        let lair = s.lair.clone();
+        tasks.spawn(async move { (i, *repo, *about, hub::judged(&lair, repo).await) });
+    }
+    let mut found = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        let (i, repo, about, files) = res?;
+        // A repo that can't be listed right now is left out rather than failing the whole list.
+        if let Ok(files) = files {
+            let pick = hub::recommend(&files, &hw).cloned();
+            found.push((i, repo, about, pick, files.iter().any(|f| f.mmproj)));
+        }
+    }
+    found.sort_by_key(|f| f.0);
+    let best = found.iter().rposition(|f| f.3.as_ref().is_some_and(|p| p.fit == hub::Fit::Fits));
+    Ok(Json(
+        found
+            .into_iter()
+            .enumerate()
+            .map(|(k, (_, repo, about, pick, vision))| {
+                json!({ "repo": repo, "about": about, "pick": pick, "vision": vision, "best": Some(k) == best })
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct HubQuery {
+    q: Option<String>,
+    repo: Option<String>,
+}
+
+async fn hub_search(State(s): S, Query(q): Query<HubQuery>) -> ApiResult<Json<Vec<hub::Repo>>> {
+    let q = q.q.unwrap_or_default();
+    if q.trim().is_empty() || q.len() > 200 {
+        return Err(bad(anyhow::anyhow!("busca vazia ou longa demais")));
+    }
+    Ok(Json(hub::search(&s.lair.http, q.trim()).await.map_err(bad_gateway)?))
+}
+
+async fn hub_files(State(s): S, Query(q): Query<HubQuery>) -> ApiResult<Json<Value>> {
+    let repo = q.repo.unwrap_or_default();
+    hub::check_repo(&repo).map_err(bad)?;
+    let files = hub::judged(&s.lair, &repo).await.map_err(bad_gateway)?;
+    let pick = hub::recommend(&files, &hub::hardware()).map(|f| f.name.clone());
+    Ok(Json(json!({ "files": files, "pick": pick })))
+}
+
+async fn hub_downloads(State(s): S) -> Json<Vec<hub::Progress>> {
+    Json(s.lair.downloads.list())
+}
+
+#[derive(Deserialize)]
+struct DownloadRequest {
+    repo: String,
+    file: String,
+}
+
+async fn hub_download(State(s): S, Json(r): Json<DownloadRequest>) -> ApiResult<StatusCode> {
+    hub::check_repo(&r.repo).map_err(bad)?;
+    hub::start(s.lair.clone(), r.repo, r.file).await.map_err(bad)?;
+    // Started, not done: progress is polled from GET /hub/downloads.
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn hub_cancel(State(s): S, Path(file): Path<String>) -> ApiResult<StatusCode> {
+    match s.lair.downloads.cancel(&file, s.lair.models.dir()) {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(missing("nenhum download com esse nome")),
+    }
+}
+
+/// Hugging Face failed or answered something unexpected: not the client's fault.
+fn bad_gateway(e: anyhow::Error) -> super::ApiError {
+    super::ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}"))
 }
