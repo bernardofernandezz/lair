@@ -9,7 +9,7 @@ Prompts, replies and models stay on machines you own.
 
 [![Release](https://img.shields.io/github/v/release/bernardofernandezz/lair?style=flat-square)](https://github.com/bernardofernandezz/lair/releases)
 [![License](https://img.shields.io/github/license/bernardofernandezz/lair?style=flat-square)](LICENSE)
-![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-555?style=flat-square)
+![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows-555?style=flat-square)
 
 [Install](#install) · [Usage](#usage) · [Features](#features) · [Configuration](#configuration) · [Build from source](#build-from-source)
 
@@ -28,9 +28,22 @@ curl -fsSL https://raw.githubusercontent.com/bernardofernandezz/lair/main/instal
 lair serve
 ```
 
+Windows 10 or 11 (x86_64), in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/bernardofernandezz/lair/main/install.ps1 | iex
+lair serve
+```
+
 Open http://localhost:8080 and start talking. The first run downloads a small reasoning model (Qwen3 4B, about 2.5 GB) so you have something to chat with right away.
 
-The installer puts `lair` in `~/.local/bin` and doesn't need root. On Linux it picks the Vulkan build when a GPU driver is present (NVIDIA, AMD and Intel all work, no CUDA required) and the CPU build otherwise. Macs use Metal.
+The installer puts `lair` in `~/.local/bin` (`%LOCALAPPDATA%\Programs\lair` on Windows) and doesn't need root. On Linux and Windows it picks the Vulkan build when a GPU driver is present (NVIDIA, AMD and Intel all work, no CUDA required) and the CPU build otherwise. Macs use Metal.
+
+### Windows
+
+- **Native** is the way to use your GPU. Data lives in `%LOCALAPPDATA%\lair`, and the agent's commands run in PowerShell. Other nodes on your tailnet aren't found on their own yet; name them with `--peer`.
+- **WSL** works with the Linux installer, and your Windows browser reaches it at http://localhost:8080. It gets the CPU build: Vulkan inside WSL is emulated and slower than the CPU. For an NVIDIA GPU from WSL, use the CUDA image in [Docker](#docker).
+- If Windows says `VCOMP140.dll` is missing, install the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
 Prefer containers? See [Docker](#docker).
 
@@ -45,7 +58,7 @@ lair list             # see what you have
 lair update           # switch to the latest release
 ```
 
-Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. The easiest way to get more is **Configurações → Modelos** in the web UI: it suggests models that fit your GPU or RAM, searches Hugging Face, and downloads them without a restart. From the terminal, `lair pull` takes a file's download link:
+Models live in `~/.local/share/lair/models` (`%LOCALAPPDATA%\lair\models` on Windows). Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. The easiest way to get more is **Configurações → Modelos** in the web UI: it suggests models that fit your GPU or RAM, searches Hugging Face, and downloads them without a restart. From the terminal, `lair pull` takes a file's download link:
 
 ```bash
 lair pull https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
@@ -156,7 +169,7 @@ Nodes talk through lair's own API (`/lair/v1/node`, `/lair/v1/generate`) over th
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `LAIR_TOKEN` | unset | Require this token on the UI and API |
-| `LAIR_DATA` | `~/.local/share/lair` | Conversations, skills and the agent's workspace |
+| `LAIR_DATA` | `~/.local/share/lair`, `%LOCALAPPDATA%\lair` on Windows | Conversations, skills and the agent's workspace |
 | `LAIR_DEFAULT_MODEL` | Qwen3 4B | `.gguf` URL fetched when there are no models; `""` turns it off |
 | `LAIR_SEARXNG` | unset | SearXNG URL for the agent's web search |
 | `LAIR_PEERS` | unset | Extra lair nodes, as `host:port`, comma-separated |
@@ -187,6 +200,8 @@ You'll need Rust, [bun](https://bun.sh), cmake and clang. For Vulkan, also the V
 sudo pacman -S vulkan-headers shaderc spirv-headers          # Arch
 sudo apt install libvulkan-dev glslc spirv-headers           # Ubuntu 24.04
 ```
+
+On Windows: Rust (MSVC), bun, cmake and LLVM (`winget install Kitware.CMake LLVM.LLVM`), plus the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) for `--features vulkan`.
 
 ```bash
 (cd web && bun install && bun run build)    # the UI is embedded at compile time
