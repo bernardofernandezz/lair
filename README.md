@@ -4,20 +4,20 @@
 
 **Your own AI on your own hardware.**
 
-One install, any GGUF model: web chat, terminal, agent and a standard chat API.<br>
-Prompts, replies and models stay on machines you own.
+One install, any GGUF model: web chat, terminal, agent, and the OpenAI and Ollama APIs your tools already speak.<br>
+All your machines become one AI. Prompts, replies and models stay on hardware you own.
 
 [![Release](https://img.shields.io/github/v/release/bernardofernandezz/lair?style=flat-square)](https://github.com/bernardofernandezz/lair/releases)
 [![License](https://img.shields.io/github/license/bernardofernandezz/lair?style=flat-square)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-555?style=flat-square)
 
-[Install](#install) · [Usage](#usage) · [Features](#features) · [Configuration](#configuration) · [Build from source](#build-from-source)
+[Install](#install) · [Usage](#usage) · [Use it from other apps](#use-it-from-other-apps) · [Features](#features) · [Configuration](#configuration) · [Build from source](#build-from-source)
 
 </div>
 
 ---
 
-lair is a single Rust binary built on [llama.cpp](https://github.com/ggml-org/llama.cpp). Point it at a folder of `.gguf` files and you get a chat UI in the browser, a chat in the terminal and an HTTP API that editors and tools already know how to talk to. Turn on agent mode and the model can work with files, run commands and search the web, always asking before it does anything risky.
+lair is a single Rust binary built on [llama.cpp](https://github.com/ggml-org/llama.cpp). Point it at a folder of `.gguf` files and you get a chat UI in the browser, a chat in the terminal and an HTTP API that editors and tools already know how to talk to, in both the OpenAI and the Ollama formats. Turn on agent mode and the model can work with files, run commands and search the web, always asking before it does anything risky. Run it on a few machines in your Tailscale network and each one can use the others' models.
 
 ## Install
 
@@ -40,18 +40,36 @@ Prefer containers? See [Docker](#docker).
 lair serve            # web UI and API on http://localhost:8080
 lair run              # chat in the terminal
 lair run llama        # ...with the model whose name contains "llama"
-lair pull <url>       # download a .gguf from any URL
+lair pull <repo>      # download from Hugging Face: the file that fits this machine best
 lair list             # see what you have
 lair update           # switch to the latest release
 ```
 
-Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. The easiest way to get more is **Settings → Models** in the web UI: it suggests models that fit your GPU or RAM, searches Hugging Face, and downloads them without a restart. From the terminal, `lair pull` takes a file's download link:
+Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. The easiest way to get more is **Settings → Models** in the web UI: it suggests models that fit your GPU or RAM, searches Hugging Face, and downloads them without a restart. From the terminal, `lair pull` does the same:
 
 ```bash
-lair pull https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+lair pull Qwen/Qwen3-8B-GGUF            # the quant that fits your GPU or RAM
+lair pull Qwen/Qwen3-8B-GGUF:Q5_K_M     # ...or the one you name
+lair pull Qwen3-8B-GGUF                 # a bare name is searched on Hugging Face
+lair pull https://example.com/m.gguf    # any .gguf link
 ```
 
-Anything that speaks the chat-completions format can use lair as a backend:
+Vision models come with their projector (`mmproj`), so they can see images right away.
+
+## Use it from other apps
+
+lair speaks two APIs on the same port, so most apps that run local models work with it unchanged.
+
+**Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/tags`, `/api/show` and `/api/version`.
+
+```bash
+curl localhost:8080/api/chat -d '{
+  "model": "Qwen3-4B-Q4_K_M",
+  "messages": [{ "role": "user", "content": "Is 221 prime?" }]
+}'
+```
+
+**Apps made for OpenAI:** set the base URL to `http://localhost:8080/v1` and any API key.
 
 ```bash
 curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -59,6 +77,14 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
   "messages": [{ "role": "user", "content": "Is 221 prime?" }]
 }'
 ```
+
+Both accept `tools` (function calling) and images, which is what coding agents and chat front-ends rely on:
+
+- **Tools:** pass `tools` as usual and calls come back as `tool_calls`. Any model works: lair asks for calls in plain text and parses them, so it doesn't depend on the model's chat template supporting tools. One call per reply.
+- **Images:** send them inline (`data:image/...;base64,` URLs in OpenAI's format, `images` in Ollama's) to a vision model. Links to images are refused, so the server never fetches anything a client points it at.
+- **Reasoning:** `reasoning_effort` (OpenAI) or `think` (Ollama) turns thinking off, light or deep, and it comes back in `reasoning_content` or `thinking`.
+
+If you set `LAIR_TOKEN`, clients must send it as `Authorization: Bearer <token>`.
 
 ## Features
 
@@ -70,7 +96,7 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
 | **Agent mode** | The model reads and writes files, runs commands, searches the web and digs through past chats. You approve each risky step. |
 | **Skills** | Prompt packages that kick in on trigger words. Write them in the UI or install them from a URL. |
 | **Your machines, one network** | lair nodes on your Tailscale network find each other and share their models. |
-| **Standard API** | `/v1/chat/completions` with streaming, and `/v1/models`. |
+| **Works with your tools** | OpenAI (`/v1`) and Ollama (`/api`) compatible, with streaming, tool calling and images. |
 
 ### Agent mode
 
@@ -207,7 +233,7 @@ src/store.rs     conversations in SQLite, with full-text search
 src/turn.rs      one conversation turn: history, references, skills, the agent loop
 src/agent/       tool-call protocol and parser, tools, approvals
 src/skills/      skill catalog, installs from URL, zip or GitHub, index
-src/server/      HTTP: chat-completions format, lair's own API, auth, UI
+src/server/      HTTP: OpenAI and Ollama formats, lair's own API, auth, UI
 src/jail.rs      keeps paths inside a folder (workspace, assets)
 web/             React UI: chat, sidebar, agent cards, skills panel, 3D scenes
 skills/          built-in skills, embedded in the binary
