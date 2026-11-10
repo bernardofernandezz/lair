@@ -76,6 +76,7 @@ const MAX_FACES = 4_000;
 const MAX_POINTS = 20_000;
 const MAX_LINES = 5_000;
 const MAX_ASSETS = 20;
+const MAX_REPEAT = 100;
 
 class SceneError extends Error {}
 
@@ -115,7 +116,7 @@ function buildScene(raw: unknown): Scene {
     autoRotate: s.camera == null || bool(obj(s.camera, "camera").autoRotate, "camera.autoRotate", true),
     lights: s.lights == null ? [] : arr(s.lights, "lights", 16).map((l, i) => parseLight(l, `lights[${i}]`)),
     grid: bool(s.grid, "grid", false),
-    nodes: nodes.map((n, i) => parseNode(n, `nodes[${i}]`, 1, count, assets)),
+    nodes: nodes.flatMap((n, i) => parseNode(n, `nodes[${i}]`, 1, count, assets)),
   };
 }
 
@@ -158,8 +159,9 @@ function parseNode(
   depth: number,
   count: { n: number },
   assets: Set<string>,
-): Node {
+): Node[] {
   if (depth > MAX_DEPTH) fail(path, `profundidade máxima de ${MAX_DEPTH}`);
+  const before = count.n;
   count.n += 1;
   if (count.n > MAX_NODES) fail(path, `a cena passa de ${MAX_NODES} nodes`);
   const n = obj(v, path);
@@ -167,7 +169,7 @@ function parseNode(
   const asset = n.asset == null ? undefined : assetId(n.asset, `${path}.asset`, assets);
   if (hasGeometry && asset) fail(path, "use geometry ou asset, não os dois");
   const children = n.children == null ? [] : arr(n.children, `${path}.children`, MAX_NODES);
-  return {
+  const node: Node = {
     geometry: hasGeometry ? parseGeometry(n.geometry, `${path}.geometry`) : undefined,
     asset,
     material: parseMaterial(n.material, `${path}.material`),
@@ -177,8 +179,31 @@ function parseNode(
     spin: n.spin == null ? undefined : vec3(n.spin, `${path}.spin`, [0, 0, 0], -20, 20),
     orbit: n.orbit == null ? undefined : parseOrbit(n.orbit, `${path}.orbit`),
     bob: n.bob == null ? undefined : parseBob(n.bob, `${path}.bob`),
-    children: children.map((c, i) => parseNode(c, `${path}.children[${i}]`, depth + 1, count, assets)),
+    children: children.flatMap((c, i) => parseNode(c, `${path}.children[${i}]`, depth + 1, count, assets)),
   };
+  if (n.repeat == null) return [node];
+  return repeat(node, obj(n.repeat, `${path}.repeat`), `${path}.repeat`, count, count.n - before);
+}
+
+/**
+ * `repeat` copies a node `count` times, each copy one more step of `offset`, `rotation` and `scale`
+ * away from the last, applied around the parent's origin: a step lifted and turned makes a spiral.
+ */
+function repeat(node: Node, r: Record<string, unknown>, path: string, count: { n: number }, size: number): Node[] {
+  const times = Math.round(num(r.count, `${path}.count`, undefined, 1, MAX_REPEAT));
+  const offset = vec3(r.offset, `${path}.offset`, [0, 0, 0], -1e4, 1e4);
+  const turn = vec3(r.rotation, `${path}.rotation`, [0, 0, 0], -1e3, 1e3);
+  const grow = vec3(r.scale, `${path}.scale`, [1, 1, 1], 0.01, 100);
+  // Each extra copy is the node's subtree again plus its wrapper; the first copy also gets a wrapper.
+  count.n += (times - 1) * size + times;
+  if (count.n > MAX_NODES) fail(path, `a cena passa de ${MAX_NODES} nodes com as repetições`);
+  return Array.from({ length: times }, (_, i) => ({
+    material: node.material,
+    position: offset.map((o) => o * i) as Vec3,
+    rotation: turn.map((t) => t * i) as Vec3,
+    scale: grow.map((g) => g ** i) as Vec3,
+    children: [node],
+  }));
 }
 
 function parseOrbit(v: unknown, path: string): Orbit {

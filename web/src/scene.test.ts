@@ -76,9 +76,35 @@ test("parseScene rejects oversized and malformed scenes", () => {
 test("the example in the 3D skill's prompt is a scene this schema accepts", () => {
   const prompt = readFileSync(new URL("../../skills/3d/prompt.md", import.meta.url), "utf8");
   const example = prompt.slice(prompt.indexOf("## Exemplo"));
-  const body = /```scene\n([\s\S]*?)```/.exec(example)?.[1];
-  expect(body).toBeDefined();
-  JSON.parse(body!); // the prompt promises strict JSON, not JSON5
-  const result = parseScene(body!);
-  expect(result.ok ? "" : result.error).toBe("");
+  const bodies = [...example.matchAll(/```scene\n([\s\S]*?)```/g)].map((m) => m[1]);
+  expect(bodies.length).toBeGreaterThanOrEqual(3);
+  for (const body of bodies) {
+    JSON.parse(body); // the prompt promises strict JSON, not JSON5
+    const result = parseScene(body);
+    expect(result.ok ? "" : result.error).toBe("");
+  }
+});
+
+test("repeat copies a node in steps around the parent's origin", () => {
+  const r = parseScene(
+    `{"nodes":[{"geometry":{"kind":"box","size":[1,0.1,0.3]},"position":[1,0,0],"repeat":{"count":3,"offset":[0,0.2,0],"rotation":[0,0.5,0],"scale":[2,1,1]}}]}`,
+  );
+  expect(r.ok).toBe(true);
+  if (!r.ok) return;
+  expect(r.scene.nodes).toHaveLength(3);
+  expect(r.scene.nodes[2].position).toEqual([0, 0.4, 0]);
+  expect(r.scene.nodes[2].rotation).toEqual([0, 1, 0]);
+  expect(r.scene.nodes[2].scale).toEqual([4, 1, 1]);
+  expect(r.scene.nodes[2].children[0].position).toEqual([1, 0, 0]);
+});
+
+test("repeat counts its copies toward the node limit", () => {
+  const child = `{"geometry":{"kind":"sphere","radius":0.1}}`;
+  const many = `{"nodes":[{"children":[${child},${child},${child}],"repeat":{"count":100}}]}`;
+  const r = parseScene(many);
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error).toContain("repetições");
+  const clamped = parseScene(`{"nodes":[{"geometry":{"kind":"box"},"repeat":{"count":0}}]}`);
+  expect(clamped.ok && clamped.scene.nodes.length).toBe(1);
+  expect(parseScene(`{"nodes":[{"geometry":{"kind":"box"},"repeat":{}}]}`).ok).toBe(false);
 });

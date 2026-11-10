@@ -1,6 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type * as THREE from "three";
 import { parseScene } from "./schema";
-import { SceneView } from "./Scene";
+import { HELPER, SceneView } from "./Scene";
+
+/** Saves the scene as a binary glTF, without the grid and shadow catcher. */
+async function downloadGlb(scene: THREE.Scene, title: string) {
+  const { GLTFExporter } = await import("three/examples/jsm/exporters/GLTFExporter.js");
+  const helpers = scene.children.filter((o) => o.name === HELPER && o.visible);
+  helpers.forEach((o) => (o.visible = false));
+  try {
+    const glb = (await new GLTFExporter().parseAsync(scene, { binary: true, onlyVisible: true })) as ArrayBuffer;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([glb], { type: "model/gltf-binary" }));
+    a.download = `${title.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "") || "cena"}.glb`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+  } finally {
+    helpers.forEach((o) => (o.visible = true));
+  }
+}
 
 /** At most this many WebGL canvases are mounted in one conversation. */
 export const MAX_CANVASES = 6;
@@ -23,6 +41,8 @@ export function SceneCard({ source, closed, render }: Props) {
   const [full, setFull] = useState(false);
   const [assetError, setAssetError] = useState<string | null>(null);
   const frame = useRef<HTMLDivElement>(null);
+  const three = useRef<THREE.Scene | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
   const spin = manual ?? (!parsed.ok || parsed.scene.autoRotate);
 
@@ -69,6 +89,29 @@ export function SceneCard({ source, closed, render }: Props) {
               Reiniciar
             </button>
           )}
+          {parsed.ok && (
+            <button
+              type="button"
+              className="ghost"
+              onClick={() =>
+                navigator.clipboard.writeText(source.trim()).then(
+                  () => setNote("JSON copiado."),
+                  () => setNote("Não foi possível copiar."),
+                )
+              }
+            >
+              Copiar JSON
+            </button>
+          )}
+          {render && parsed.ok && (
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => three.current && downloadGlb(three.current, title).catch((e) => setNote(`Não foi possível exportar: ${(e as Error).message}`))}
+            >
+              Baixar .glb
+            </button>
+          )}
           {render && parsed.ok && (
             <button type="button" className="ghost" onClick={toggleFullscreen}>
               {full ? "Sair" : "Tela cheia"}
@@ -104,8 +147,15 @@ export function SceneCard({ source, closed, render }: Props) {
             autoRotate={spin}
             resetKey={resetKey}
             onAssetError={onAssetError}
+            onReady={(s) => (three.current = s)}
           />
         </div>
+      )}
+
+      {note && (
+        <p className="scene-note" role="status">
+          {note}
+        </p>
       )}
 
       {assetError && (
