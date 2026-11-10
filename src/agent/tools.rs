@@ -102,7 +102,7 @@ pub const SPECS: &[Spec] = &[
         name: "web_search",
         label: "Buscar na web",
         subject: "query",
-        usage: r#"busca na web. {"query": "..."}"#,
+        usage: r#"busca na web; cada resultado vem com um número n para citar. {"query": "..."}"#,
         needs_approval: true,
     },
     Spec {
@@ -161,7 +161,9 @@ pub fn system_prompt() -> String {
          só quando precisar. Se disser que vai fazer algo, faça a chamada logo em seguida, na mesma \
          resposta; não termine a resposta só anunciando. Com o resultado em mãos, responda ao usuário \
          normalmente, sem <tool_call>.\n\
-         Caminhos são relativos à pasta de trabalho (workspace).\n\nFerramentas:\n",
+         Caminhos são relativos à pasta de trabalho (workspace).\n\
+         Ao usar informação de uma busca na web, cite a fonte com o número dela entre colchetes logo \
+         depois do trecho, assim: [1]. Cite só números que a busca devolveu.\n\nFerramentas:\n",
     );
     for s in SPECS {
         out.push_str(&format!("- {}: {}\n", s.name, s.usage));
@@ -169,8 +171,9 @@ pub fn system_prompt() -> String {
     out
 }
 
-/// Runs one call; the text is what the model reads back, already shortened.
-pub async fn run(lair: &Lair, tool: Tool, args: &Value) -> Result<String> {
+/// Runs one call; the text is what the model reads back, already shortened. `sources` counts the web
+/// results already numbered in this turn, so citations stay unique across searches.
+pub async fn run(lair: &Lair, tool: Tool, args: &Value, sources: &mut usize) -> Result<String> {
     let ws = lair.workspace.as_path();
     let out = match tool {
         Tool::ListDir => list_dir(ws, str_arg(args, "path").unwrap_or(".")),
@@ -182,7 +185,7 @@ pub async fn run(lair: &Lair, tool: Tool, args: &Value) -> Result<String> {
             Ok("apagado".into())
         }
         Tool::RunCommand => run_command(ws, req(args, "command")?).await,
-        Tool::WebSearch => web_search(lair.config().searxng.as_deref(), &lair.http, req(args, "query")?).await,
+        Tool::WebSearch => web_search(lair.config().searxng.as_deref(), &lair.http, req(args, "query")?, sources).await,
         Tool::FetchUrl => fetch_url(&lair.http, req(args, "url")?).await,
         Tool::ListSkills => {
             let catalog = lair.skills.read().unwrap();
@@ -296,7 +299,7 @@ async fn run_command(ws: &Path, command: &str) -> Result<String> {
     Ok(format!("[código de saída {}]\n{}", out.status.code().unwrap_or(-1), text.trim_end()))
 }
 
-async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str) -> Result<String> {
+async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str, sources: &mut usize) -> Result<String> {
     #[derive(Deserialize)]
     struct Results {
         results: Vec<Hit>,
@@ -321,9 +324,24 @@ async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str) 
         .results
         .into_iter()
         .take(6)
-        .map(|h| json!({ "title": h.title, "url": h.url, "snippet": h.content }))
+        .map(|h| {
+            *sources += 1;
+            json!({ "n": *sources, "title": h.title, "url": h.url, "snippet": h.content })
+        })
         .collect();
     Ok(if hits.is_empty() { "nenhum resultado".into() } else { serde_json::to_string_pretty(&hits)? })
+}
+
+/// The page's `<title>`, so the UI and the model know what was read.
+fn html_title(html: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(&html[..html.len().min(64 * 1024)]);
+    let lower = head.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let start = start + lower[start..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    let title = html2text::from_read(head[start..end].as_bytes(), usize::MAX).ok()?;
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then_some(title)
 }
 
 async fn fetch_url(http: &reqwest::Client, url: &str) -> Result<String> {
@@ -334,7 +352,11 @@ async fn fetch_url(http: &reqwest::Client, url: &str) -> Result<String> {
     let (headers, body, _) = crate::net::get_capped(http, url, FETCH_LIMIT).await?;
     let html = headers.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.contains("html"));
     Ok(if html {
-        html2text::from_read(body.as_slice(), 100).unwrap_or_default()
+        let text = html2text::from_read(body.as_slice(), 100).unwrap_or_default();
+        match html_title(&body) {
+            Some(title) => format!("Título: {title}\n\n{text}"),
+            None => text,
+        }
     } else {
         String::from_utf8_lossy(&body).into_owned()
     })
@@ -379,6 +401,16 @@ mod tests {
         assert_eq!(read_file(&t, "docs/a.md").unwrap(), "um 2 um");
         assert!(write_file(&t, "../fora.md", "x").is_err());
         assert!(read_file(&t, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn page_titles_are_read_and_unescaped() {
+        assert_eq!(
+            html_title(b"<html><HEAD><title lang=pt>\n Ol&aacute;  mundo </title>").as_deref(),
+            Some("Olá mundo")
+        );
+        assert_eq!(html_title(b"<html><title></title>"), None);
+        assert_eq!(html_title(b"<p>sem titulo</p>"), None);
     }
 
     #[tokio::test]

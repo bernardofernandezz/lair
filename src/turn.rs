@@ -155,7 +155,7 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
         let _ = out.send(Out::Skill(s.clone()));
     }
 
-    let mut step = Step { lair, conv, out, skill, tokens: 0 };
+    let mut step = Step { lair, conv, out, skill, tokens: 0, sources: 0 };
     for _ in 0..agent::MAX_STEPS {
         match step.generate(&model, prompt.clone(), params, c.agent).await? {
             Err(Gone) => return Ok(()),
@@ -200,6 +200,8 @@ struct Step<'a> {
     skill: Option<Named>,
     /// Context used by the last generation.
     tokens: usize,
+    /// Web results numbered so far, for citations.
+    sources: usize,
 }
 
 impl Step<'_> {
@@ -311,7 +313,7 @@ impl Step<'_> {
                     Some(true)
                 };
                 match allowed {
-                    Some(true) => match tools::run(self.lair, spec.tool, &arguments).await {
+                    Some(true) => match tools::run(self.lair, spec.tool, &arguments, &mut self.sources).await {
                         Ok(text) => (ToolStatus::Ok, text),
                         Err(e) => (ToolStatus::Error, format!("{e:#}")),
                     },

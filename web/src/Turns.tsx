@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolCard } from "./agent/ToolCard";
+import { citedIn, domain, linkCitations, sourcesOf, type Source } from "./agent/sources";
 import { MAX_CANVASES, SceneCard } from "./scene/SceneCard";
 import { splitMessage, type Segment } from "./scene/split";
 import { convPath } from "./api";
@@ -123,6 +124,20 @@ function Reply({
   onDecide: Props["onDecide"];
 }) {
   const thinking = live && !hasText(turn) && !turn.parts.some((p) => p.kind === "tool");
+  const sources = useMemo(() => sourcesOf(turn.parts), [turn.parts]);
+  const text = turn.parts.map((p) => (p.kind === "text" ? p.text : "")).join("\n");
+  const cited = citedIn(text, sources);
+  // Small models often skip citing: then every result searched is listed.
+  const listed = (cited.length ? cited : [...sources.keys()]).map((n) => sources.get(n)!);
+  const components = useMemo(
+    () => ({
+      a: ({ href, children, node: _, ...rest }: ComponentProps<"a"> & { node?: unknown }) => {
+        const src = href?.startsWith("#src-") ? sources.get(Number(href.slice(5))) : undefined;
+        return src ? <Cite source={src} /> : <a href={href} {...rest}>{children}</a>;
+      },
+    }),
+    [sources],
+  );
   let scene = sceneStart;
   return (
     <li className="turn assistant" aria-busy={live}>
@@ -146,8 +161,8 @@ function Reply({
             <div key={j} className="answer" aria-live={live ? "polite" : undefined}>
               {segments[j].map((segment, k) =>
                 segment.kind === "md" ? (
-                  <Markdown key={k} remarkPlugins={[remarkGfm]}>
-                    {segment.text}
+                  <Markdown key={k} remarkPlugins={[remarkGfm]} components={components}>
+                    {linkCitations(segment.text, sources)}
                   </Markdown>
                 ) : (
                   <SceneCard key={k} source={segment.source} closed={segment.closed} render={scene++ < MAX_CANVASES} />
@@ -157,7 +172,24 @@ function Reply({
           )
         ),
       )}
+      {!live && listed.length > 0 && (
+        <p className="sources" aria-label="Fontes">
+          <span className="sources-label">Fontes</span>
+          {listed.map((s) => (
+            <Cite key={s.n} source={s} />
+          ))}
+        </p>
+      )}
     </li>
+  );
+}
+
+/** A source as a small badge with its domain, linking to the page. */
+function Cite({ source }: { source: Source }) {
+  return (
+    <a className="cite" href={source.url} target="_blank" rel="noreferrer noopener" title={`${source.n}. ${source.title}`}>
+      {domain(source.url)}
+    </a>
   );
 }
 

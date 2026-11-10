@@ -64,6 +64,31 @@ test("groupByNode puts this machine first and keeps each node's order", () => {
   expect(groupByNode([m("a@x", "x")]).map(([n]) => n)).toEqual(["x"]);
 });
 
+import { citedIn, linkCitations, parseSources, sourcesOf } from "./agent/sources";
+
+const searchOutput = JSON.stringify([
+  { n: 1, title: "Um", url: "https://www.a.com/x", snippet: "s" },
+  { n: 2, title: "Dois", url: "https://b.org", snippet: "" },
+  { n: 3, title: "Mau", url: "javascript:alert(1)", snippet: "" },
+]);
+
+test("parseSources keeps numbered http(s) results and ignores anything else", () => {
+  expect(parseSources(searchOutput).map((s) => s.n)).toEqual([1, 2]);
+  expect(parseSources("nenhum resultado")).toEqual([]);
+  expect(parseSources("[não é json")).toEqual([]);
+});
+
+test("linkCitations links known sources only, outside code", () => {
+  const known = sourcesOf([
+    { kind: "tool", step: { id: "a", name: "web_search", label: "", subject: "", arguments: {}, needsApproval: false, status: "ok", output: searchOutput } },
+  ]);
+  expect(linkCitations("Fato [1]. Outro [1, 2]. Falso [9].", known)).toBe("Fato [1](#src-1). Outro [1](#src-1)[2](#src-2). Falso [9].");
+  expect(linkCitations("Use `a[1]` e\n```\nb[2]\n```\nok [2]", known)).toBe("Use `a[1]` e\n```\nb[2]\n```\nok [2](#src-2)");
+  expect(linkCitations("já é [1](https://x)", known)).toBe("já é [1](https://x)");
+  expect(citedIn("b [2] a [1] de novo [2]", known)).toEqual([2, 1]);
+  expect(linkCitations("[1]", new Map())).toBe("[1]");
+});
+
 import { bareName } from "./Controls";
 
 test("bareName drops a trailing quantization only", () => {
