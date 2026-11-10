@@ -1,0 +1,49 @@
+# Tests, formatting and lints on every push to main and every PR; release.yml runs it too before
+# publishing. CPU build only: the GPU features change how llama.cpp compiles, not lair's behaviour.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      # Type-checks (tsc --noEmit) before bundling.
+      - run: bun run build
+      - run: bun test
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Saved from main, so release tags can restore it too.
+      - uses: Swatinem/rust-cache@v2
+      # The UI is embedded from web/dist; the tests don't need it built, only present.
+      - run: mkdir -p web/dist
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
