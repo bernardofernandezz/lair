@@ -179,8 +179,8 @@ pub fn start(
     Ok(Started { model, skill, out })
 }
 
-/// Forwards a generation, cutting it at the first call to an offered tool. Dropping `rx` there stops
-/// the engine; `_images` lives until the generation is over.
+/// Forwards a generation, cutting it at the first call to an offered tool or when the client leaves.
+/// Dropping `rx` there stops the engine; `_images` lives until the generation is over.
 async fn split(
     mut rx: mpsc::UnboundedReceiver<Event>,
     tx: mpsc::UnboundedSender<Out>,
@@ -189,6 +189,9 @@ async fn split(
 ) {
     let mut calls = (!names.is_empty()).then(|| CallSplit::new(names.iter().map(String::as_str)));
     while let Some(event) = rx.recv().await {
+        if tx.is_closed() {
+            return;
+        }
         let (pieces, last) = match event {
             Event::Thinking { text } => {
                 let _ = tx.send(Out::Thinking(text));
@@ -468,6 +471,16 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"hi");
         drop(imgs);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_client_that_left_stops_the_generation() {
+        let (etx, erx) = mpsc::unbounded_channel();
+        let (tx, out) = mpsc::unbounded_channel();
+        drop(out);
+        etx.send(Event::Answer { text: "one".into() }).unwrap();
+        split(erx, tx, vec![], TempImages::default()).await;
+        assert!(etx.send(Event::Answer { text: "two".into() }).is_err(), "the engine's receiver is gone");
     }
 
     #[tokio::test]
