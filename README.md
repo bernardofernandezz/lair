@@ -42,6 +42,7 @@ lair run              # chat in the terminal
 lair run llama        # ...with the model whose name contains "llama"
 lair pull <url>       # download a .gguf from any URL
 lair list             # see what you have
+lair update           # switch to the latest release
 ```
 
 Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. Hugging Face is the usual place to find them; `lair pull` takes the file's download link:

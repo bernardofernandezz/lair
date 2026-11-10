@@ -55,3 +55,4 @@ echo "  lair serve     web UI and API on http://localhost:8080 (downloads a star
 echo "  lair run       chat in the terminal"
 echo "  lair pull URL  download a .gguf model"
 echo "  lair list      show your models"
+echo "  lair update    switch to the latest release"

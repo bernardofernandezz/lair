@@ -14,6 +14,7 @@ mod skills;
 mod sse;
 mod store;
 mod turn;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -93,6 +94,9 @@ enum Cmd {
         #[command(flatten)]
         network: NetworkArgs,
     },
+    /// Update lair to the latest release
+    #[command(visible_alias = "self-update")]
+    Update,
 }
 
 #[derive(Args)]
@@ -294,6 +298,7 @@ async fn main() -> Result<()> {
             .clone();
             tokio::task::block_in_place(|| chat::run(&mut engine, &id, params, system))
         }
+        Cmd::Update => update::run().await,
         Cmd::Pull { url, models } => download(&url, &models_dir(models)?).await.map(drop),
         Cmd::List { models } => {
             let dir = models_dir(models)?;

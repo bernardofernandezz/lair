@@ -31,6 +31,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # `lair update` compares the binary's version to the tag, so they must agree.
+      - run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml || { echo "Cargo.toml version doesn't match tag $GITHUB_REF_NAME"; exit 1; }
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev ${{ matrix.apt }}
       - uses: oven-sh/setup-bun@v2
