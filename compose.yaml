@@ -51,6 +51,9 @@ services:
   searxng:
     profiles: [web]
     image: searxng/searxng:2026.10.25-54ca1d9cf
+    # Published on localhost so a natively running lair can use it too: --searxng http://localhost:8888
+    ports:
+      - "127.0.0.1:8888:8080"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
