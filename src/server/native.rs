@@ -39,6 +39,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/skills", get(skills).post(create_skill))
         .route("/skills/index", get(skills_index))
         .route("/skills/install", post(install_skill))
+        .route("/skills/upload", post(upload_skill))
         .route("/skills/{id}", put(save_skill).patch(toggle_skill).delete(remove_skill))
         .route("/files", get(file_types).post(upload_file))
         .route("/files/{id}", get(file))
@@ -140,6 +141,13 @@ struct InstallRequest {
 /// Downloads a skill from a URL (zip, GitHub folder or folder) into lair's skills folder.
 async fn install_skill(State(s): S, Json(r): Json<InstallRequest>) -> ApiResult<Json<Skill>> {
     let f = install::fetch(&s.lair.http, &r.url).await.map_err(bad)?;
+    Ok(Json(s.lair.skills.write().unwrap().save(&f.id, &f.manifest, &f.prompt).map_err(bad)?))
+}
+
+/// Installs a skill from an uploaded .zip, read the same way as one from a URL.
+async fn upload_skill(State(s): S, form: Multipart) -> ApiResult<Json<Skill>> {
+    let (name, data) = read_file(form).await?;
+    let f = install::from_zip_bytes(&data, &name).map_err(bad)?;
     Ok(Json(s.lair.skills.write().unwrap().save(&f.id, &f.manifest, &f.prompt).map_err(bad)?))
 }
 

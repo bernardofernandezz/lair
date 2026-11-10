@@ -184,6 +184,8 @@ export function client(token: string) {
     toggleSkill: (id: string, enabled: boolean) => send<void>("PATCH", `/lair/v1/skills/${encodeURIComponent(id)}`, { enabled }),
     removeSkill: (id: string) => send<void>("DELETE", `/lair/v1/skills/${encodeURIComponent(id)}`),
     installSkill: (url: string) => send<Skill>("POST", "/lair/v1/skills/install", { url }),
+    /** A skill in a `.zip`, read from the user's disk. */
+    uploadSkill: (file: File) => upload<Skill>("/lair/v1/skills/upload", one("file", file)),
     skillsIndex: () => get<{ configured: boolean; skills: { entry: IndexEntry; installed: boolean }[] }>("/lair/v1/skills/index"),
 
     settings: () => get<Settings>("/lair/v1/settings"),

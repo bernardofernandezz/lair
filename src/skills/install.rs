@@ -110,6 +110,14 @@ fn from_zip(bytes: &[u8], under: Option<&str>, fallback_id: &str) -> Result<Fetc
     Ok(Fetched { id: folder.map_or_else(|| fallback_id.to_owned(), slug), manifest, prompt })
 }
 
+/// Parses an uploaded `.zip` the same way an URL's would be: the shallowest `skill.json` wins.
+/// Its source is recorded as an upload, so it shows as installed and tracks no remote URL.
+pub fn from_zip_bytes(bytes: &[u8], file_name: &str) -> Result<Fetched> {
+    let mut fetched = from_zip(bytes, None, &last_segment(file_name))?;
+    fetched.manifest.source = Some(format!("upload:{file_name}"));
+    Ok(fetched)
+}
+
 async fn download(http: &reqwest::Client, url: &str, limit: usize) -> Result<Vec<u8>> {
     let (_, body, cut) = crate::net::get_capped(http, url, limit).await?;
     if cut {
@@ -223,5 +231,20 @@ mod tests {
         assert!(from_zip(&no_prompt, None, "x").unwrap_err().to_string().contains("prompt.md"));
         let big = zip_of(&[("p/skill.json", MANIFEST), ("p/prompt.md", &"a".repeat(FILE_LIMIT as usize + 1))]);
         assert!(from_zip(&big, None, "x").unwrap_err().to_string().contains("larger"));
+    }
+
+    #[test]
+    fn an_uploaded_zip_becomes_an_installed_skill_with_a_safe_id() {
+        let f = from_zip_bytes(
+            &zip_of(&[("pirate/skill.json", MANIFEST), ("pirate/prompt.md", "Arr.")]),
+            "Pirata Pack.zip",
+        )
+        .unwrap();
+        assert_eq!(f.id, "pirate", "the folder inside the zip names the skill, as with a URL");
+        assert_eq!(f.manifest.source.as_deref(), Some("upload:Pirata Pack.zip"));
+
+        let f = from_zip_bytes(&zip_of(&[("skill.json", MANIFEST), ("prompt.md", "x")]), "===.zip").unwrap();
+        assert_eq!(f.id, "skill", "no folder inside: the (cleaned) file name is the fallback");
+        assert!(from_zip_bytes(b"not a zip", "x.zip").is_err());
     }
 }

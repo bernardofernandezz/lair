@@ -48,6 +48,9 @@ export function SkillsTab({ api }: Props) {
 
   return (
     <>
+      <div className="explore">
+        <UploadZip api={api} onInstalled={refresh} />
+      </div>
       {error && (
         <p className="error" role="alert">
           {error}
@@ -82,12 +85,63 @@ export function SkillsTab({ api }: Props) {
           </li>
         ))}
       </ul>
-      {skills.length === 0 && <p className="hint">Nenhuma skill ainda. Instale de um endereço ou crie aqui.</p>}
+      {skills.length === 0 && <p className="hint">Nenhuma skill ainda. Importe um .zip, instale de um endereço ou crie aqui.</p>}
       <button className="solid" onClick={() => setEditing("new")}>
         Nova skill
       </button>
       <IndexSkills api={api} onInstalled={refresh} />
     </>
+  );
+}
+
+/** Installs a skill straight from a `.zip` on the user's disk. */
+function UploadZip({ api, onInstalled }: { api: Api; onInstalled: () => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function upload(f: File | null) {
+    if (input.current) input.current.value = "";
+    if (!f) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const s = await api.uploadSkill(f);
+      onInstalled();
+      setMessage({ ok: true, text: `“${s.name}” importada do zip.` });
+    } catch (e) {
+      setMessage({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="install-url">
+      <label htmlFor="skill-zip">Importar um .zip do computador</label>
+      <div className="field">
+        <input ref={input} id="skill-zip" type="file" accept=".zip,application/zip" hidden onChange={(e) => upload(e.target.files?.item(0) ?? null)} />
+        <input
+          type="text"
+          inputMode="none"
+          readOnly
+          value={busy ? "Enviando…" : "Escolher arquivo…"}
+          aria-hidden
+          tabIndex={-1}
+          onClick={() => input.current?.click()}
+          onFocus={(e) => e.target.blur()}
+        />
+        <button type="button" className="solid" disabled={busy} onClick={() => input.current?.click()}>
+          {busy ? "Enviando…" : "Importar"}
+        </button>
+      </div>
+      <p className="hint">Um arquivo .zip contendo skill.json e prompt.md.</p>
+      {message && (
+        <p className={message.ok ? "notice-ok" : "error"} role="status">
+          {message.text}
+        </p>
+      )}
+    </div>
   );
 }
 
