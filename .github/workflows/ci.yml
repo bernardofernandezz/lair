@@ -45,9 +45,6 @@ jobs:
       - uses: actions/checkout@v7
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
-      # The C runtime linked in, as in the released binary: no Visual C++ Redistributable to install.
-      - if: runner.os == 'Windows'
-        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

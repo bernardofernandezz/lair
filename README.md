@@ -43,7 +43,7 @@ The installer puts `lair` in `~/.local/bin` (`%LOCALAPPDATA%\Programs\lair` on W
 
 - **Native** is the way to use your GPU. Data lives in `%LOCALAPPDATA%\lair`, and the agent's commands run in PowerShell. Other nodes on your tailnet aren't found on their own yet; name them with `--peer`.
 - **WSL** works with the Linux installer, and your Windows browser reaches it at http://localhost:8080. It gets the CPU build: Vulkan inside WSL is emulated and slower than the CPU. For an NVIDIA GPU from WSL, use the CUDA image in [Docker](#docker).
-- If Windows says `VCOMP140.dll` is missing, install the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+- lair needs the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe). Most machines already have it; install it if Windows says `VCRUNTIME140.dll`, `MSVCP140.dll` or `VCOMP140.dll` is missing.
 
 Prefer containers? See [Docker](#docker).
 

@@ -75,9 +75,6 @@ jobs:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile && bun run build
         working-directory: web
-      # The C runtime linked in, so the binary needs no Visual C++ Redistributable.
-      - if: runner.os == 'Windows'
-        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
       - name: Vulkan SDK
         if: runner.os == 'Windows' && matrix.features == 'vulkan'
         shell: pwsh
