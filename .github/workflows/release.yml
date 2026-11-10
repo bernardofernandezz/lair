@@ -26,7 +26,7 @@ jobs:
             features: vulkan
             apt: libvulkan-dev glslc spirv-headers
           - asset: lair-macos-arm64
-            os: macos-14
+            os: macos-15
             features: metal
     runs-on: ${{ matrix.os }}
     steps:
