@@ -23,9 +23,11 @@ type Props = {
   fileTypes: FileTypes;
   onSend: (text: string, refs: Ref[], files: Pending[]) => void;
   onStop: () => void;
+  /** Every keystroke, so the pearl can listen. */
+  onType?: () => void;
 };
 
-export function Composer({ api, conversations, current, busy, hello, tools, vision, fileTypes: types, onSend, onStop }: Props) {
+export function Composer({ api, conversations, current, busy, hello, tools, vision, fileTypes: types, onSend, onStop, onType }: Props) {
   const [draft, setDraft] = useState("");
   const [refs, setRefs] = useState<Ref[]>([]);
   const [files, setFiles] = useState<Pending[]>([]);
@@ -48,6 +50,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
 
   function track(text: string, caret: number) {
     setDraft(text);
+    onType?.();
     const m = mentionAt(text, caret);
     if (m?.query !== mention?.query) setHi(0);
     setMention(m);

@@ -1,6 +1,7 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, type RefObject } from "react";
 import * as THREE from "three";
+import { PEARL, vec3 } from "./palette";
 
 const noise = /* glsl */ `
 // Simplex 3D noise — Ashima Arts / Stefan Gustavson, MIT.
@@ -52,7 +53,9 @@ float snoise(vec3 v){
 
 const vertexShader = /* glsl */ `
 uniform float uTime;
+uniform float uClock;
 uniform float uActivity;
+uniform float uListen;
 varying vec3 vNormal;
 varying vec3 vView;
 varying float vNoise;
@@ -64,7 +67,9 @@ float field(vec3 dir) {
 }
 
 vec3 displaced(vec3 dir) {
-  return dir * (1.0 + field(dir) * (0.06 + uActivity * 0.14));
+  // Typing sends a soft ring down the surface, like a sound reaching it.
+  float ripple = uListen * 0.025 * sin(dir.y * 11.0 - uClock * 9.0) * (1.0 - abs(dir.y));
+  return dir * (1.0 + field(dir) * (0.06 + uActivity * 0.14) + ripple);
 }
 
 void main() {
@@ -84,18 +89,23 @@ void main() {
 `;
 
 // Thin-film interference look: the film colour shifts with viewing angle, like oil on obsidian.
+// State colours: teal idle/working, gold while a tool call waits for approval, red when a turn fails.
 const fragmentShader = /* glsl */ `
 uniform float uActivity;
 uniform float uThinking;
+uniform float uClock;
 uniform float uDark;
+uniform float uWaiting;
+uniform float uAction;
+uniform float uError;
 varying vec3 vNormal;
 varying vec3 vView;
 varying float vNoise;
 
 vec3 film(float t) {
-  const vec3 teal = vec3(0.25, 0.72, 0.69);
-  const vec3 violet = vec3(0.48, 0.36, 0.84);
-  const vec3 gold = vec3(0.89, 0.72, 0.34);
+  const vec3 teal = ${vec3(PEARL.teal)};
+  const vec3 violet = ${vec3(PEARL.violet)};
+  const vec3 gold = ${vec3(PEARL.gold)};
   float s = fract(t) * 3.0;
   return s < 1.0 ? mix(teal, violet, s) : s < 2.0 ? mix(violet, gold, s - 1.0) : mix(gold, teal, s - 2.0);
 }
@@ -106,16 +116,76 @@ void main() {
   float facing = max(dot(n, v), 0.0);
   float rim = pow(1.0 - facing, 2.0);
   vec3 base = mix(vec3(0.075, 0.068, 0.095), vec3(0.11, 0.10, 0.14), uDark);
-  vec3 sheen = film(rim * 0.9 + vNoise * 0.25 + 0.15 + uThinking * 0.22) * rim * (0.8 + uActivity * 0.7);
+  // Light caught under the surface: a slow breath in the core keeps the pearl alive while idle.
+  float breath = 0.5 + 0.5 * sin(uClock * 1.1);
+  float core = pow(facing, 2.5) * (0.05 + 0.035 * breath + uActivity * 0.06) * (0.6 + 0.4 * (vNoise * 0.5 + 0.5));
+  base += film(0.12 + vNoise * 0.18 + uClock * 0.015) * core;
+  // The film drifts on its own, so the colours move even when the sphere is still.
+  float phase = rim * 0.9 + vNoise * 0.25 + 0.15 + uThinking * 0.22 + n.y * 0.08 + uClock * 0.01;
+  vec3 sheen = film(phase) * rim * (0.8 + uActivity * 0.7);
+  // A tool running deepens the violet; an approval waiting turns the rim gold; a failure goes red and dims.
+  sheen = mix(sheen, ${vec3(PEARL.violet)} * 0.9 * rim * 1.35, uAction * rim * 0.55);
+  sheen = mix(sheen, ${vec3(PEARL.gold)} * rim * 1.35, uWaiting * rim * 0.85);
+  sheen = mix(sheen, ${vec3(PEARL.red)} * 0.7 * rim * 1.25, uError * rim * 0.9);
+  sheen *= 1.0 - uError * 0.3;
   vec3 l = normalize(vec3(-0.45, 0.8, 0.55));
   float spec = pow(max(dot(reflect(-l, n), v), 0.0), 48.0);
   float soft = pow(max(dot(reflect(-l, n), v), 0.0), 6.0) * 0.08;
-  gl_FragColor = vec4(base + sheen + vec3(spec * 0.7 + soft), 1.0);
+  // A cool kicker from below-right outlines the lower edge against the page.
+  vec3 l2 = normalize(vec3(0.7, -0.55, 0.35));
+  float kick = pow(max(dot(reflect(-l2, n), v), 0.0), 14.0) * 0.18;
+  gl_FragColor = vec4(base + sheen + vec3(spec * 0.7 + soft) + vec3(0.55, 0.5, 0.95) * kick * (1.0 - uError), 1.0);
 }
 `;
 
-/** Written by the chat as tokens stream: `pulse` is bumped per token and decays here. */
-export type OrbSignal = { pulse: number; thinking: boolean };
+// A soft aura around the pearl in the colour of what it is doing. A slightly larger back-faced
+// sphere, brightest at its silhouette: bloom without a post-processing pass.
+const haloVertex = /* glsl */ `
+varying vec3 vNormal;
+varying vec3 vView;
+void main() {
+  vNormal = normalize(normalMatrix * normal);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vView = -mv.xyz;
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
+const haloFragment = /* glsl */ `
+uniform float uActivity;
+uniform float uThinking;
+uniform float uWaiting;
+uniform float uAction;
+uniform float uError;
+uniform float uDark;
+uniform float uClock;
+varying vec3 vNormal;
+varying vec3 vView;
+void main() {
+  // Seen from outside, the back face faces us most near the pearl and not at all at the halo's rim,
+  // so the glow is strongest against the pearl and fades to nothing outward.
+  float facing = abs(dot(normalize(vNormal), normalize(vView)));
+  float glow = pow(facing, 1.6);
+  vec3 c = ${vec3(PEARL.teal)};
+  c = mix(c, ${vec3(PEARL.violet)}, max(uThinking, uAction));
+  c = mix(c, ${vec3(PEARL.gold)}, uWaiting);
+  c = mix(c, ${vec3(PEARL.red)}, uError);
+  float breath = 0.85 + 0.15 * sin(uClock * 1.1);
+  float strength = (0.22 + uActivity * 0.35 + uWaiting * 0.35 + uAction * 0.15) * breath * mix(0.75, 1.0, uDark);
+  gl_FragColor = vec4(c, glow * strength);
+}
+`;
+
+/** Written by the chat as the turn happens, through the helpers below: token pulses, typing, thinking, tools, approvals and failures. */
+export type OrbSignal = { pulse: number; listen: number; thinking: boolean; tool: boolean; waiting: boolean; error: boolean };
+
+export const newSignal = (): OrbSignal => ({ pulse: 0, listen: 0, thinking: false, tool: false, waiting: false, error: false });
+/** A streamed token; a finished tool counts double. */
+export const pulse = (s: OrbSignal, strong = false) => void (s.pulse = Math.min(1.6, s.pulse + (strong ? 0.6 : 0.3)));
+/** A keystroke in the composer. */
+export const typed = (s: OrbSignal) => void (s.listen = Math.min(1, s.listen + 0.35));
+/** The turn ended: nothing running any more. */
+export const settle = (s: OrbSignal) => Object.assign(s, { thinking: false, tool: false, waiting: false });
 
 type Props = {
   signal: RefObject<OrbSignal>;
@@ -126,10 +196,23 @@ const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)"
 const darkScheme = () => window.matchMedia("(prefers-color-scheme: dark)").matches;
 
 function Pearl({ signal, docked }: Props) {
+  const group = useRef<THREE.Group>(null!);
   const mesh = useRef<THREE.Mesh>(null!);
+  const hover = useRef(0);
+  const hovered = useRef(false);
   const { gl, viewport } = useThree();
   const uniforms = useMemo(
-    () => ({ uTime: { value: 0 }, uActivity: { value: 0 }, uThinking: { value: 0 }, uDark: { value: darkScheme() ? 1 : 0 } }),
+    () => ({
+      uTime: { value: 0 },
+      uClock: { value: 0 },
+      uListen: { value: 0 },
+      uActivity: { value: 0 },
+      uThinking: { value: 0 },
+      uDark: { value: darkScheme() ? 1 : 0 },
+      uWaiting: { value: 0 },
+      uAction: { value: 0 },
+      uError: { value: 0 },
+    }),
     [],
   );
   const motion = useRef({ still: reducedMotion(), dragging: false, lastX: 0, lastY: 0, vx: 0, vy: 0, rx: 0, ry: 0, tiltX: 0, tiltY: 0, px: 0, py: 0 });
@@ -184,9 +267,17 @@ function Pearl({ signal, docked }: Props) {
 
     const sig = signal.current;
     sig.pulse *= Math.exp(-dt * 2.2);
+    sig.listen *= Math.exp(-dt * 2.5);
+    if (!m.still) uniforms.uClock.value += dt;
+    uniforms.uListen.value += ((m.still ? 0 : Math.min(sig.listen, 1)) - uniforms.uListen.value) * ease(8);
     uniforms.uActivity.value += (Math.min(sig.pulse, 1) - uniforms.uActivity.value) * ease(6);
     uniforms.uThinking.value += ((sig.thinking ? 1 : 0) - uniforms.uThinking.value) * ease(2);
-    const speed = 0.22 + uniforms.uActivity.value * (1.6 - uniforms.uThinking.value * 1.1);
+    // A pending approval beats like a heart; reduced motion keeps the gold at a calm level.
+    const beat = m.still ? 0.8 : 0.72 + 0.28 * Math.max(Math.sin(uniforms.uTime.value * 2.6), 0) ** 3;
+    uniforms.uWaiting.value += ((sig.waiting ? beat : 0) - uniforms.uWaiting.value) * ease(2);
+    uniforms.uAction.value += ((sig.tool ? 1 : 0) - uniforms.uAction.value) * ease(3);
+    uniforms.uError.value += ((sig.error ? 1 : 0) - uniforms.uError.value) * ease(3);
+    const speed = 0.22 + uniforms.uActivity.value * (1.6 - uniforms.uThinking.value * 1.1) + uniforms.uAction.value * 0.5;
     if (!m.still) uniforms.uTime.value += dt * speed;
 
     if (!m.dragging) {
@@ -198,29 +289,57 @@ function Pearl({ signal, docked }: Props) {
     m.tiltX += (m.py * 0.22 - m.tiltX) * ease(3);
     m.tiltY += (m.px * 0.3 - m.tiltY) * ease(3);
 
-    const o = mesh.current;
-    o.rotation.set(m.rx + m.tiltX, m.ry + m.tiltY, 0);
+    mesh.current.rotation.set(m.rx + m.tiltX, m.ry + m.tiltY, 0);
 
     const fit = Math.min(1, viewport.width / 2.2);
     const dockedScale = Math.min(0.16, viewport.width * 0.08);
-    const scale = docked ? dockedScale : 0.62 * fit;
-    const y = docked ? viewport.height / 2 - dockedScale * 2 : 0.35;
+    hover.current += ((hovered.current && !docked ? 1 : 0) - hover.current) * ease(6);
+    const breath = m.still ? 1 : 1 + 0.012 * Math.sin(uniforms.uClock.value * 1.1);
+    const scale = (docked ? dockedScale : 0.62 * fit) * breath * (1 + hover.current * 0.04);
+    // Tall phone screens lift the pearl clear of the greeting and composer below it.
+    const lift = Math.min(0.45, Math.max(0, viewport.height / viewport.width - 1) * 0.32);
+    const y = docked ? viewport.height / 2 - dockedScale * 2 : 0.35 + lift;
     const k = m.still ? 1 : ease(3.2);
+    const o = group.current;
     o.position.y += (y - o.position.y) * k;
     o.scale.setScalar(o.scale.x + (scale - o.scale.x) * k);
   });
 
   return (
-    <mesh ref={mesh} scale={0.001}>
-      <icosahedronGeometry args={[1, 64]} />
-      <shaderMaterial vertexShader={vertexShader} fragmentShader={fragmentShader} uniforms={uniforms} />
-    </mesh>
+    <group ref={group} scale={0.001}>
+      <mesh
+        ref={mesh}
+        onPointerOver={() => (hovered.current = true)}
+        onPointerOut={() => (hovered.current = false)}
+      >
+        <icosahedronGeometry args={[1, 64]} />
+        <shaderMaterial vertexShader={vertexShader} fragmentShader={fragmentShader} uniforms={uniforms} />
+      </mesh>
+      <mesh scale={1.22} renderOrder={-1} raycast={() => null}>
+        <sphereGeometry args={[1, 48, 32]} />
+        <shaderMaterial
+          vertexShader={haloVertex}
+          fragmentShader={haloFragment}
+          uniforms={uniforms}
+          side={THREE.BackSide}
+          transparent
+          depthWrite={false}
+        />
+      </mesh>
+    </group>
   );
 }
 
 export function Orb(props: Props) {
   return (
-    <Canvas className="orb" camera={{ position: [0, 0, 4.2], fov: 40 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true }} aria-hidden>
+    <Canvas
+      className="orb"
+      camera={{ position: [0, 0, 4.2], fov: 40 }}
+      dpr={[1, 2]}
+      gl={{ antialias: true, alpha: true }}
+      aria-hidden
+      fallback={<span className="pearl pearl-hero" aria-hidden />}
+    >
       <Pearl {...props} />
     </Canvas>
   );

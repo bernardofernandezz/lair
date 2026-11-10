@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "re
 import { AuthError, ConnectionLost, type Api, type Conversation, type Effort, type FileTypes, type ModelInfo, type Ref, type UploadedFile } from "./api";
 import { Composer, type Pending } from "./Composer";
 import { isEffort, ModelPicker, ReasoningControl } from "./Controls";
-import type { OrbSignal } from "./Orb";
+import { pulse, settle, typed, type OrbSignal } from "./Orb";
 import { load, save } from "./storage";
 import { Turns } from "./Turns";
 import { addCall, addText, emptyReply, fromStored, setResult, snapshot, type Turn } from "./parts";
@@ -80,6 +80,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
     abort.current = ctl;
     pinned.current = true;
     setError(null);
+    signal.current.error = false;
     setBusy(true);
     const before: Turn[] = [...turns, { role: "user", content: text, refs, attachments: files.map(({ file, image }) => ({ name: file.name, image, src: image ? URL.createObjectURL(file) : undefined })) }];
     const reply = emptyReply();
@@ -103,20 +104,24 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
             thinkStart ||= performance.now();
             reply.reasoning += e.data.text;
             sig.thinking = true;
-            sig.pulse = Math.min(1.6, sig.pulse + 0.3);
+            pulse(sig);
             break;
           case "answer":
             if (thinkStart && reply.thinkMs === undefined) reply.thinkMs = performance.now() - thinkStart;
             addText(reply, e.data.text);
             sig.thinking = false;
-            sig.pulse = Math.min(1.6, sig.pulse + 0.3);
+            pulse(sig);
             break;
           case "tool_call":
             addCall(reply, e.data, e.data.needs_approval);
+            sig.tool = true;
+            sig.waiting = e.data.needs_approval;
             break;
           case "tool_result":
             setResult(reply, e.data);
-            sig.pulse = Math.min(1.6, sig.pulse + 0.6);
+            sig.tool = false;
+            sig.waiting = false;
+            pulse(sig, true);
             break;
           case "done":
             return;
@@ -125,12 +130,13 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
       });
     } catch (e) {
       if (e instanceof AuthError) return onAuthLost();
+      signal.current.error = true;
       // The server already saved the question, so it stays on screen; only an empty reply is dropped.
       if (reply.parts.length === 0 && !reply.reasoning) setTurns(before);
       if (e instanceof ConnectionLost) recover();
       else if (!ctl.signal.aborted) setError(`Não foi possível responder: ${(e as Error).message}`);
     } finally {
-      signal.current.thinking = false;
+      settle(signal.current);
       setBusy(false);
       abort.current = null;
       onTurnEnd();
@@ -146,9 +152,11 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
         setModels(await api.models());
         if (conv.current) setTurns(fromStored((await api.read(conv.current)).messages));
         setError(null);
+        signal.current.error = false;
         onTurnEnd();
         return;
       } catch {
+        signal.current.error = true;
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
@@ -195,6 +203,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
         onSend={send}
         vision={!!current.vision}
         fileTypes={fileTypes}
+        onType={() => typed(signal.current)}
         onStop={() => abort.current?.abort()}
         tools={
           <>

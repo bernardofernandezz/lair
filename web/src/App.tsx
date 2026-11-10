@@ -4,7 +4,8 @@ import { Chat } from "./Chat";
 import { Sidebar } from "./conversations/Sidebar";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { Gate } from "./Gate";
-import { Orb, type OrbSignal } from "./Orb";
+import { newSignal, Orb, type OrbSignal } from "./Orb";
+import { watchFavicon } from "./favicon";
 import { load, save } from "./storage";
 
 type Phase =
@@ -16,9 +17,11 @@ type Phase =
 const idFromPath = () => /^\/c\/([^/]+)/.exec(location.pathname)?.[1] ?? null;
 
 export function App() {
-  const signal = useRef<OrbSignal>({ pulse: 0, thinking: false });
+  const signal = useRef<OrbSignal>(newSignal());
   const [phase, setPhase] = useState<Phase>({ kind: "connecting" });
   const [active, setActive] = useState(false);
+
+  useEffect(() => watchFavicon(() => signal.current), []);
 
   const connect = useCallback(async (token: string) => {
     const api = client(token);
