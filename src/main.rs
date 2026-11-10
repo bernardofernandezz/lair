@@ -1,13 +1,16 @@
 mod agent;
 mod assets;
 mod chat;
+mod config;
 mod engine;
 mod jail;
 mod lair;
 mod models;
+mod net;
 mod peers;
 mod server;
 mod skills;
+mod sse;
 mod store;
 mod turn;
 
@@ -17,16 +20,16 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
-use anyhow::Context;
-use agent::tools::Tools;
 use agent::Approvals;
+use anyhow::Context;
 use assets::Assets;
+use config::Config;
+use engine::{Engine, Params, Reasoning};
 use lair::Lair;
 use models::Models;
 use peers::Peers;
-use store::Store;
-use engine::{Engine, Params, Reasoning};
 use skills::Catalog;
+use store::Store;
 
 /// lair — run LLMs locally (GGUF via llama.cpp). Nothing leaves this machine.
 #[derive(Parser)]
@@ -105,20 +108,18 @@ struct NetworkArgs {
 }
 
 impl NetworkArgs {
-    async fn peers(self, port: u16, http: reqwest::Client) -> Peers {
-        let socket = self.tailscale_socket.exists().then_some(self.tailscale_socket);
-        let tailscale = match &socket {
-            Some(s) => Peers::tailscale_name(s).await,
-            None => None,
+    /// The peers finder and this node's automatic name: its Tailscale host name, else the host name.
+    async fn peers(&self, port: u16, http: reqwest::Client) -> (Peers, String) {
+        let socket = self.tailscale_socket.exists().then(|| self.tailscale_socket.clone());
+        let tailnet = socket.is_some();
+        let peers = Peers::new(socket, port, http);
+        let auto = match peers.status().await {
+            Some(s) if !s.host.is_empty() => s.host,
+            _ => std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_owned()).unwrap_or_default(),
         };
-        let name = self
-            .name
-            .or(tailscale)
-            .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_owned()))
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| "lair".into());
-        eprintln!("node name {name}{}", if socket.is_some() { ", looking for peers on the tailnet" } else { "" });
-        Peers::new(name, socket, self.peers, port, http)
+        let auto = if auto.is_empty() { "lair".to_owned() } else { auto };
+        eprintln!("node name {auto}{}", if tailnet { ", looking for peers on the tailnet" } else { "" });
+        (peers, auto)
     }
 }
 
@@ -141,7 +142,11 @@ struct SkillArgs {
 impl SkillArgs {
     /// Skills created or installed here live in `<data>/skills`.
     fn catalog(&self, data: &std::path::Path) -> Catalog {
-        if self.no_skills { Catalog::default() } else { Catalog::load(self.skills_dir.clone(), data.join("skills")) }
+        if self.no_skills {
+            Catalog::default()
+        } else {
+            Catalog::load(self.skills_dir.clone(), data.join("skills"))
+        }
     }
 }
 
@@ -164,18 +169,14 @@ struct ModelArgs {
     #[arg(long, default_value_t = 4096)]
     max_tokens: usize,
     /// How much reasoning models think: none, low (~512 tokens) or high (unlimited)
-    #[arg(long, default_value = "high", value_parser = parse_reasoning)]
-    reasoning: Reasoning,
+    #[arg(long)]
+    reasoning: Option<Reasoning>,
     /// Model downloaded into the first models folder when no .gguf is found there ("" = never download)
     #[arg(long, env = "LAIR_DEFAULT_MODEL", default_value = DEFAULT_MODEL)]
     default_model: String,
 }
 
 const DEFAULT_MODEL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf";
-
-fn parse_reasoning(s: &str) -> Result<Reasoning, String> {
-    serde_json::from_value(serde_json::Value::String(s.into())).map_err(|_| "expected none, low or high".into())
-}
 
 impl ModelArgs {
     /// Without `-m`, models live in `<data>/models`, created on first use.
@@ -195,7 +196,11 @@ impl ModelArgs {
         if !found.is_empty() || self.default_model.is_empty() {
             return Ok(());
         }
-        let dir = self.models.iter().find(|p| p.is_dir()).context("no .gguf found and no models folder to download one into")?;
+        let dir = self
+            .models
+            .iter()
+            .find(|p| p.is_dir())
+            .context("no .gguf found and no models folder to download one into")?;
         eprintln!("no models in {}; downloading the default one", dir.display());
         download(&self.default_model, dir).await.map(drop)
     }
@@ -210,7 +215,7 @@ impl ModelArgs {
             top_p: self.top_p,
             max_tokens: self.max_tokens,
             seed: None,
-            reasoning: self.reasoning,
+            reasoning: self.reasoning.unwrap_or_default(),
         };
         Ok((engine, params))
     }
@@ -226,19 +231,23 @@ fn models_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
 /// Downloads a .gguf into `dir`, showing progress. Saved as `.part` and renamed only when complete,
 /// so an interrupted download never looks like a model.
 async fn download(url: &str, dir: &std::path::Path) -> Result<PathBuf> {
-    let name = url.split(['?', '#']).next().unwrap_or(url).rsplit('/').next().filter(|n| n.ends_with(".gguf")).context("the URL must point to a .gguf file")?;
+    let name = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .filter(|n| n.ends_with(".gguf"))
+        .context("the URL must point to a .gguf file")?;
     let (dest, part) = (dir.join(name), dir.join(format!("{name}.part")));
-    // No overall timeout: the file is gigabytes; only connecting is bounded.
-    let http = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .user_agent(concat!("lair/", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let http = net::download_client();
     eprintln!("downloading {url}");
-    let mut resp = http.get(url).send().await.and_then(|r| r.error_for_status()).with_context(|| format!("downloading {url}"))?;
+    let mut resp =
+        http.get(url).send().await.and_then(|r| r.error_for_status()).with_context(|| format!("downloading {url}"))?;
     let total = resp.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&part)
-        .await
-        .with_context(|| format!("{} is not writable; put a .gguf in it or mount it with write access", dir.display()))?;
+    let mut file = tokio::fs::File::create(&part).await.with_context(|| {
+        format!("{} is not writable; put a .gguf in it or mount it with write access", dir.display())
+    })?;
     let (mut done, mut shown) = (0u64, 0u64);
     while let Some(chunk) = resp.chunk().await.with_context(|| format!("downloading {url}"))? {
         tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
@@ -273,7 +282,11 @@ async fn main() -> Result<()> {
             model.ensure_model().await?;
             let (mut engine, params) = model.load()?;
             let id = match &name {
-                Some(n) => engine.models().iter().find(|m| m.id.contains(n.as_str())).with_context(|| format!("no model matching {n:?}; see `lair list`"))?,
+                Some(n) => engine
+                    .models()
+                    .iter()
+                    .find(|m| m.id.contains(n.as_str()))
+                    .with_context(|| format!("no model matching {n:?}; see `lair list`"))?,
                 None => &engine.models()[0],
             }
             .id
@@ -291,7 +304,10 @@ async fn main() -> Result<()> {
                 println!("{:<48} {:>6.1} GB", path.strip_prefix(&dir).unwrap_or(path).display(), size as f64 / 1e9);
             }
             if found.is_empty() {
-                eprintln!("no models in {}; `lair pull <url>` downloads one, or `lair serve` fetches a default", dir.display());
+                eprintln!(
+                    "no models in {}; `lair pull <url>` downloads one, or `lair serve` fetches a default",
+                    dir.display()
+                );
             }
             Ok(())
         }
@@ -307,20 +323,34 @@ async fn main() -> Result<()> {
             model.resolve(&data)?;
             model.ensure_model().await?;
             let (engine, defaults) = model.load()?;
-            let http = agent::tools::http_client();
-            let peers = Arc::new(network.peers(port, http.clone()).await);
-            let lair = Lair {
-                models: Models::new(engine, peers),
-                store: Store::open(&data.join("lair.db"))?,
-                skills: RwLock::new(skills.catalog(&data)),
+            let http = net::client();
+            let (peers, auto_name) = network.peers(port, http.clone()).await;
+            let flags = Config {
+                searxng,
                 skills_index: skills.skills_index.clone(),
+                name: network.name.filter(|n| !n.is_empty()),
+                peers: network.peers,
+                reasoning: model.reasoning,
+                trust_tailnet: None,
+            };
+            let store = Store::open(&data.join("lair.db"))?;
+            let saved = lair::saved(&store);
+            let peers = Arc::new(peers);
+            let lair = Lair {
+                models: Models::new(engine, peers.clone()),
+                peers,
+                store,
+                skills: RwLock::new(skills.catalog(&data)),
                 http,
                 assets: Assets::new(&skills.assets),
-                tools: Tools { workspace, searxng },
+                workspace,
                 approvals: Approvals::default(),
-                defaults,
+                params: defaults,
                 // ~3 characters per token; half the context for history, half for the reply.
                 history_chars: model.ctx as usize * 3 / 2,
+                config: RwLock::new(flags.over(&saved)),
+                flags,
+                auto_name,
                 stopping: tokio::sync::watch::Sender::new(false),
             };
             server::run(lair, token, format!("{host}:{port}")).await
@@ -343,11 +373,8 @@ mod tests {
     async fn the_default_model_is_only_fetched_into_an_empty_folder() {
         let dir = std::env::temp_dir().join(format!("lair-ensure-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // Empty and downloads switched off: nothing to do.
         assert!(args(&dir, "").ensure_model().await.is_ok());
-        // Empty and the URL isn't a .gguf: refused before any request.
         assert!(args(&dir, "http://invalid.invalid/model.bin").ensure_model().await.is_err());
-        // A model is already there: the unreachable URL is never tried.
         std::fs::write(dir.join("m.gguf"), b"x").unwrap();
         assert!(args(&dir, "http://invalid.invalid/model.gguf").ensure_model().await.is_ok());
         std::fs::remove_dir_all(&dir).unwrap();

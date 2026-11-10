@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AuthError, client, type Api, type Conversation, type ModelInfo } from "./api";
+import { AuthError, client, convPath, type Api, type Conversation, type Effort, type ModelInfo } from "./api";
 import { Chat } from "./Chat";
 import { Sidebar } from "./conversations/Sidebar";
-import { SkillsPanel } from "./skills/SkillsPanel";
+import { SettingsPanel } from "./settings/SettingsPanel";
 import { Gate } from "./Gate";
 import { Orb, type OrbSignal } from "./Orb";
 import { load, save } from "./storage";
@@ -11,7 +11,7 @@ type Phase =
   | { kind: "connecting" }
   | { kind: "gate"; error?: string; attempt: number }
   | { kind: "offline" }
-  | { kind: "ready"; api: Api; models: ModelInfo[] };
+  | { kind: "ready"; api: Api; models: ModelInfo[]; defaultEffort: Effort };
 
 const idFromPath = () => /^\/c\/([^/]+)/.exec(location.pathname)?.[1] ?? null;
 
@@ -23,10 +23,10 @@ export function App() {
   const connect = useCallback(async (token: string) => {
     const api = client(token);
     try {
-      const models = await api.models();
+      const [models, settings] = await Promise.all([api.models(), api.settings()]);
       save("token", token);
       await api.session().catch(() => {});
-      setPhase({ kind: "ready", api, models });
+      setPhase({ kind: "ready", api, models, defaultEffort: settings.system.reasoning });
     } catch (e) {
       if (!(e instanceof AuthError)) return setPhase({ kind: "offline" });
       save("token", "");
@@ -51,7 +51,10 @@ export function App() {
   return (
     <>
       <Orb signal={signal} docked={phase.kind === "ready" && active} />
-      <span className="mark">lair</span>
+      <span className="mark">
+        <span className="pearl" aria-hidden />
+        lair
+      </span>
       {phase.kind === "gate" && <Gate error={phase.error} attempt={phase.attempt} onSubmit={connect} />}
       {phase.kind === "offline" && (
         <div className="center notice" role="alert">
@@ -62,7 +65,7 @@ export function App() {
         </div>
       )}
       {phase.kind === "ready" && (
-        <Workspace api={phase.api} models={phase.models} signal={signal} onActive={setActive} onAuthLost={authLost} />
+        <Workspace api={phase.api} models={phase.models} defaultEffort={phase.defaultEffort} signal={signal} onActive={setActive} onAuthLost={authLost} />
       )}
     </>
   );
@@ -71,19 +74,20 @@ export function App() {
 type WorkspaceProps = {
   api: Api;
   models: ModelInfo[];
+  defaultEffort: Effort;
   signal: React.RefObject<OrbSignal>;
   onActive: (active: boolean) => void;
   onAuthLost: () => void;
 };
 
 /** The signed-in app: conversation list on the side, the open conversation in the middle. */
-function Workspace({ api, models, signal, onActive, onAuthLost }: WorkspaceProps) {
+function Workspace({ api, models, defaultEffort, signal, onActive, onAuthLost }: WorkspaceProps) {
   const [current, setCurrent] = useState(idFromPath);
   // Remounts the chat on navigation only; creating a conversation mid-turn must not cut the stream.
   const [visit, setVisit] = useState(0);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [open, setOpen] = useState(() => (load("sidebar") || (innerWidth > 900 ? "open" : "closed")) === "open");
-  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refresh = useCallback(() => {
     api.conversations().then(setConversations, (e) => e instanceof AuthError && onAuthLost());
@@ -91,6 +95,9 @@ function Workspace({ api, models, signal, onActive, onAuthLost }: WorkspaceProps
 
   useEffect(refresh, [refresh]);
   useEffect(() => save("sidebar", open ? "open" : "closed"), [open]);
+  useEffect(() => {
+    if (location.hash === "#config") setSettingsOpen(true);
+  }, []);
   useEffect(() => {
     const onPop = () => {
       setCurrent(idFromPath());
@@ -102,7 +109,7 @@ function Workspace({ api, models, signal, onActive, onAuthLost }: WorkspaceProps
 
   const go = useCallback(
     (id: string | null) => {
-      history.pushState(null, "", id ? `/c/${id}` : "/");
+      history.pushState(null, "", id ? convPath(id) : "/");
       setCurrent(id);
       setVisit((v) => v + 1);
       if (innerWidth <= 900) setOpen(false);
@@ -120,19 +127,21 @@ function Workspace({ api, models, signal, onActive, onAuthLost }: WorkspaceProps
         current={current}
         onOpen={go}
         onChanged={refresh}
-        onSkills={() => setSkillsOpen(true)}
+        onSettings={() => setSettingsOpen(true)}
       />
-      <SkillsPanel api={api} open={skillsOpen} onClose={() => setSkillsOpen(false)} />
+      <SettingsPanel api={api} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <Chat
         key={visit}
         api={api}
         models={models}
+        defaultEffort={defaultEffort}
+        onOpen={go}
         conversationId={current}
         conversations={conversations}
         signal={signal}
         onActive={onActive}
         onCreated={(id) => {
-          history.replaceState(null, "", `/c/${id}`);
+          history.replaceState(null, "", convPath(id));
           setCurrent(id);
           refresh();
         }}

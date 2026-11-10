@@ -1,19 +1,6 @@
 import { useState } from "react";
 import type { ToolStep } from "../parts";
 
-const LABELS: Record<string, string> = {
-  list_dir: "Listar pasta",
-  read_file: "Ler arquivo",
-  write_file: "Escrever arquivo",
-  edit_file: "Editar arquivo",
-  delete_file: "Apagar arquivo",
-  run_command: "Rodar comando",
-  web_search: "Buscar na web",
-  fetch_url: "Abrir página",
-  search_conversations: "Buscar conversas",
-  read_conversation: "Ler conversa",
-};
-
 const STATUS: Record<ToolStep["status"], string> = {
   pending: "Aguardando você",
   running: "Executando",
@@ -21,14 +8,6 @@ const STATUS: Record<ToolStep["status"], string> = {
   error: "Falhou",
   denied: "Negado",
 };
-
-/** The one argument that says what the step is about: a path, a command, a query… */
-function subject(args: Record<string, unknown>): string {
-  for (const key of ["command", "path", "query", "url", "id"]) {
-    if (typeof args[key] === "string") return args[key] as string;
-  }
-  return "";
-}
 
 type Props = {
   step: ToolStep;
@@ -50,8 +29,8 @@ export function ToolCard({ step, onDecide }: Props) {
       <details open={pending}>
         <summary>
           <span className="tool-dot" aria-hidden />
-          <span className="tool-name">{LABELS[step.name] ?? step.name}</span>
-          <code className="tool-subject">{subject(step.arguments)}</code>
+          <span className="tool-name">{step.label}</span>
+          <code className="tool-subject">{step.subject}</code>
           <span className="tool-status">{STATUS[step.status]}</span>
         </summary>
         {detail && <pre className="tool-detail">{detail}</pre>}

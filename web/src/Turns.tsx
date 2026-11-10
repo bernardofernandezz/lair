@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { ToolCard } from "./agent/ToolCard";
 import { MAX_CANVASES, SceneCard } from "./scene/SceneCard";
 import { splitMessage, type Segment } from "./scene/split";
+import { convPath } from "./api";
 import { hasText, type AssistantTurn, type Turn } from "./parts";
 
 type Props = {
@@ -13,10 +14,10 @@ type Props = {
   /** Name of the model being loaded for this reply, if it is not in memory yet. */
   loading: string | false;
   onDecide: (callId: string, allow: boolean, always: boolean) => void;
+  onOpen: (id: string) => void;
 };
 
-export function Turns({ turns, live, loading, onDecide }: Props) {
-  // Text parts split into Markdown and 3D scenes; the canvas budget is shared by the whole conversation.
+export function Turns({ turns, live, loading, onDecide, onOpen }: Props) {
   const segments = useMemo(
     () => turns.map((t) => (t.role === "assistant" ? t.parts.map((p) => (p.kind === "text" ? splitMessage(p.text) : [])) : [])),
     [turns],
@@ -31,7 +32,16 @@ export function Turns({ turns, live, loading, onDecide }: Props) {
               {!!t.refs?.length && (
                 <span className="ref-chips">
                   {t.refs.map((r) => (
-                    <a key={r.id} className="ref-chip" href={`/c/${r.id}`}>
+                    <a
+                      key={r.id}
+                      className="ref-chip"
+                      href={convPath(r.id)}
+                      onClick={(e) => {
+                        if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+                        e.preventDefault();
+                        onOpen(r.id);
+                      }}
+                    >
                       <span>{r.title}</span>
                     </a>
                   ))}

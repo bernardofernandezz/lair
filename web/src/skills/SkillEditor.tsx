@@ -3,17 +3,6 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Api, Skill } from "../api";
 
-/** A skill id from its name: lowercase ASCII words joined by hyphens. */
-export function slug(name: string): string {
-  return name
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-}
-
 type Props = { api: Api; skill: Skill | null; onDone: () => void };
 
 export function SkillEditor({ api, skill, onDone }: Props) {
@@ -24,14 +13,14 @@ export function SkillEditor({ api, skill, onDone }: Props) {
   const [preview, setPreview] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const id = skill?.id ?? slug(name);
 
   async function save() {
     setSaving(true);
     setError(null);
     try {
       const triggers = when.split(",").map((w) => w.trim()).filter(Boolean);
-      await api.saveSkill(id, { name: name.trim(), description: description.trim(), when: triggers, prompt });
+      const draft = { name: name.trim(), description: description.trim(), when: triggers, prompt };
+      await (skill ? api.saveSkill(skill.id, draft) : api.createSkill(draft));
       onDone();
     } catch (e) {
       setError((e as Error).message);
@@ -53,7 +42,6 @@ export function SkillEditor({ api, skill, onDone }: Props) {
         Nome
         <input value={name} onChange={(e) => setName(e.target.value)} required />
       </label>
-      {!skill && name && <p className="hint">Identificador: {id || "use letras ou números no nome"}</p>}
       <label>
         Descrição
         <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Uma frase sobre o que ela faz" />
@@ -81,7 +69,7 @@ export function SkillEditor({ api, skill, onDone }: Props) {
         </p>
       )}
       <div className="editor-actions">
-        <button className="solid" disabled={saving || !id}>
+        <button className="solid" disabled={saving}>
           {saving ? "Salvando…" : "Salvar"}
         </button>
         <button type="button" className="ghost" onClick={onDone}>

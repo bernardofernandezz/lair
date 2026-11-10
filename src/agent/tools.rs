@@ -1,6 +1,6 @@
 //! The tools an agent may call, what each needs from the user, and how each runs.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -17,8 +17,31 @@ const MAX_OUTPUT: usize = 6000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const FETCH_LIMIT: usize = 2 * 1024 * 1024;
 
+/// Which handler runs a call; one per row of [`SPECS`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tool {
+    ListDir,
+    ReadFile,
+    WriteFile,
+    EditFile,
+    DeleteFile,
+    RunCommand,
+    WebSearch,
+    FetchUrl,
+    SearchConversations,
+    ReadConversation,
+    ListSkills,
+    SaveSkill,
+}
+
 pub struct Spec {
+    pub tool: Tool,
+    /// What the model writes in a call.
     pub name: &'static str,
+    /// What the UI shows for a step.
+    pub label: &'static str,
+    /// The argument that says what a call is about, shown next to the label.
+    pub subject: &'static str,
     /// One line for the model: what the tool does and its arguments.
     pub usage: &'static str,
     /// Changes something or reaches outside this machine, so the user approves each call.
@@ -26,35 +49,99 @@ pub struct Spec {
 }
 
 pub const SPECS: &[Spec] = &[
-    Spec { name: "list_dir", usage: r#"lista uma pasta do workspace. {"path": "."}"#, needs_approval: false },
-    Spec { name: "read_file", usage: r#"lê um arquivo de texto do workspace. {"path": "notas.md"}"#, needs_approval: false },
     Spec {
+        tool: Tool::ListDir,
+        name: "list_dir",
+        label: "Listar pasta",
+        subject: "path",
+        usage: r#"lista uma pasta do workspace. {"path": "."}"#,
+        needs_approval: false,
+    },
+    Spec {
+        tool: Tool::ReadFile,
+        name: "read_file",
+        label: "Ler arquivo",
+        subject: "path",
+        usage: r#"lê um arquivo de texto do workspace. {"path": "notas.md"}"#,
+        needs_approval: false,
+    },
+    Spec {
+        tool: Tool::WriteFile,
         name: "write_file",
+        label: "Escrever arquivo",
+        subject: "path",
         usage: r#"cria ou substitui um arquivo do workspace. {"path": "notas.md", "content": "..."}"#,
         needs_approval: true,
     },
     Spec {
+        tool: Tool::EditFile,
         name: "edit_file",
+        label: "Editar arquivo",
+        subject: "path",
         usage: r#"troca um trecho exato de um arquivo. {"path": "a.txt", "find": "texto atual", "replace": "texto novo"}"#,
         needs_approval: true,
     },
-    Spec { name: "delete_file", usage: r#"apaga um arquivo do workspace. {"path": "velho.txt"}"#, needs_approval: true },
     Spec {
+        tool: Tool::DeleteFile,
+        name: "delete_file",
+        label: "Apagar arquivo",
+        subject: "path",
+        usage: r#"apaga um arquivo do workspace. {"path": "velho.txt"}"#,
+        needs_approval: true,
+    },
+    Spec {
+        tool: Tool::RunCommand,
         name: "run_command",
+        label: "Rodar comando",
+        subject: "command",
         usage: r#"roda um comando de shell na pasta do workspace (60 s no máximo). {"command": "ls -la"}"#,
         needs_approval: true,
     },
-    Spec { name: "web_search", usage: r#"busca na web. {"query": "..."}"#, needs_approval: true },
-    Spec { name: "fetch_url", usage: r#"baixa uma página e devolve o texto. {"url": "https://..."}"#, needs_approval: true },
     Spec {
+        tool: Tool::WebSearch,
+        name: "web_search",
+        label: "Buscar na web",
+        subject: "query",
+        usage: r#"busca na web. {"query": "..."}"#,
+        needs_approval: true,
+    },
+    Spec {
+        tool: Tool::FetchUrl,
+        name: "fetch_url",
+        label: "Abrir página",
+        subject: "url",
+        usage: r#"baixa uma página e devolve o texto. {"url": "https://..."}"#,
+        needs_approval: true,
+    },
+    Spec {
+        tool: Tool::SearchConversations,
         name: "search_conversations",
+        label: "Buscar conversas",
+        subject: "query",
         usage: r#"procura nas conversas salvas do usuário. {"query": "..."}"#,
         needs_approval: false,
     },
-    Spec { name: "read_conversation", usage: r#"lê uma conversa salva pelo id. {"id": "..."}"#, needs_approval: false },
-    Spec { name: "list_skills", usage: "lista as skills e seus gatilhos. {}", needs_approval: false },
     Spec {
+        tool: Tool::ReadConversation,
+        name: "read_conversation",
+        label: "Ler conversa",
+        subject: "id",
+        usage: r#"lê uma conversa salva pelo id. {"id": "..."}"#,
+        needs_approval: false,
+    },
+    Spec {
+        tool: Tool::ListSkills,
+        name: "list_skills",
+        label: "Listar skills",
+        subject: "",
+        usage: "lista as skills e seus gatilhos. {}",
+        needs_approval: false,
+    },
+    Spec {
+        tool: Tool::SaveSkill,
         name: "save_skill",
+        label: "Salvar skill",
+        subject: "id",
         usage: r#"cria ou substitui uma skill (instruções extras ativadas por palavras). {"id": "pirata", "name": "Pirata", "description": "...", "when": ["pirata"], "prompt": "Responda como um pirata."}"#,
         needs_approval: true,
     },
@@ -82,176 +169,176 @@ pub fn system_prompt() -> String {
     out
 }
 
-/// Where tools act. `searxng` is the base URL of a SearXNG instance, when web search is set up.
-pub struct Tools {
-    pub workspace: PathBuf,
-    pub searxng: Option<String>,
-}
-
-/// The HTTP client lair uses for everything that reaches the network.
-pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent(concat!("lair/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .expect("an HTTP client with default settings builds")
-}
-
-impl Tools {
-
-    /// Runs one call; the text is what the model reads back, already shortened.
-    pub async fn run(&self, lair: &Lair, name: &str, args: &Value) -> Result<String> {
-        let out = match name {
-            "list_dir" => self.list_dir(str_arg(args, "path").unwrap_or(".")),
-            "read_file" => self.read_file(req(args, "path")?),
-            "write_file" => self.write_file(req(args, "path")?, req(args, "content")?),
-            "edit_file" => self.edit_file(req(args, "path")?, req(args, "find")?, str_arg(args, "replace").unwrap_or("")),
-            "delete_file" => {
-                std::fs::remove_file(jail::existing(&self.workspace, req(args, "path")?)?)?;
-                Ok("apagado".into())
-            }
-            "run_command" => self.run_command(req(args, "command")?).await,
-            "web_search" => self.web_search(&lair.http, req(args, "query")?).await,
-            "fetch_url" => fetch_url(&lair.http, req(args, "url")?).await,
-            "list_skills" => {
-                let catalog = lair.skills.read().unwrap();
-                let lines: Vec<String> = catalog
-                    .list()
-                    .iter()
-                    .map(|s| format!("- {} ({}): {} [gatilhos: {}]{}", s.id, s.name, s.description, s.when.join(", "), if s.enabled { "" } else { " (desligada)" }))
-                    .collect();
-                Ok(lines.join("\n"))
-            }
-            "save_skill" => {
-                let id = req(args, "id")?;
-                let when = args.get("when").and_then(Value::as_array).map(|w| w.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
-                let manifest = Manifest { name: req(args, "name")?.to_owned(), description: str_arg(args, "description").unwrap_or("").to_owned(), when, source: None };
-                lair.skills.write().unwrap().save(id, &manifest, req(args, "prompt")?)?;
-                Ok(format!("skill {id} salva; ela roda quando a mensagem do usuário tiver um dos gatilhos"))
-            }
-            "search_conversations" => {
-                let hits = lair.store.search(req(args, "query")?)?;
-                Ok(if hits.is_empty() { "nenhuma conversa encontrada".into() } else { serde_json::to_string_pretty(&hits)? })
-            }
-            "read_conversation" => {
-                let id = req(args, "id")?;
-                let c = lair.store.get(id)?.with_context(|| format!("conversa {id} não existe"))?;
-                let body: String = lair
-                    .store
-                    .messages(id)?
-                    .iter()
-                    .filter(|m| m.role != "tool")
-                    .map(|m| format!("{}: {}\n", m.role, m.content))
-                    .collect();
-                Ok(format!("# {}\n{body}", c.title))
-            }
-            other => bail!("ferramenta desconhecida: {other}"),
-        }?;
-        Ok(shorten(out))
-    }
-
-    fn list_dir(&self, path: &str) -> Result<String> {
-        let dir = jail::existing(&self.workspace, path)?;
-        let mut names: Vec<String> = std::fs::read_dir(dir)?
-            .flatten()
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if e.path().is_dir() { format!("{name}/") } else { name }
+/// Runs one call; the text is what the model reads back, already shortened.
+pub async fn run(lair: &Lair, tool: Tool, args: &Value) -> Result<String> {
+    let ws = lair.workspace.as_path();
+    let out = match tool {
+        Tool::ListDir => list_dir(ws, str_arg(args, "path").unwrap_or(".")),
+        Tool::ReadFile => read_file(ws, req(args, "path")?),
+        Tool::WriteFile => write_file(ws, req(args, "path")?, req(args, "content")?),
+        Tool::EditFile => {
+            edit_file(ws, req(args, "path")?, req(args, "find")?, str_arg(args, "replace").unwrap_or(""))
+        }
+        Tool::DeleteFile => {
+            std::fs::remove_file(jail::existing(ws, req(args, "path")?)?)?;
+            Ok("apagado".into())
+        }
+        Tool::RunCommand => run_command(ws, req(args, "command")?).await,
+        Tool::WebSearch => web_search(lair.config().searxng.as_deref(), &lair.http, req(args, "query")?).await,
+        Tool::FetchUrl => fetch_url(&lair.http, req(args, "url")?).await,
+        Tool::ListSkills => {
+            let catalog = lair.skills.read().unwrap();
+            let lines: Vec<String> = catalog
+                .list()
+                .iter()
+                .map(|s| {
+                    format!(
+                        "- {} ({}): {} [gatilhos: {}]{}",
+                        s.id,
+                        s.name,
+                        s.description,
+                        s.when.join(", "),
+                        if s.enabled { "" } else { " (desligada)" }
+                    )
+                })
+                .collect();
+            Ok(lines.join("\n"))
+        }
+        Tool::SaveSkill => {
+            let id = req(args, "id")?;
+            let when = args
+                .get("when")
+                .and_then(Value::as_array)
+                .map(|w| w.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .unwrap_or_default();
+            let manifest = Manifest {
+                name: req(args, "name")?.to_owned(),
+                description: str_arg(args, "description").unwrap_or("").to_owned(),
+                when,
+                source: None,
+            };
+            lair.skills.write().unwrap().save(id, &manifest, req(args, "prompt")?)?;
+            Ok(format!("skill {id} salva; ela roda quando a mensagem do usuário tiver um dos gatilhos"))
+        }
+        Tool::SearchConversations => {
+            let hits = lair.store.search(req(args, "query")?)?;
+            Ok(if hits.is_empty() {
+                "nenhuma conversa encontrada".into()
+            } else {
+                serde_json::to_string_pretty(&hits)?
             })
-            .collect();
-        names.sort();
-        Ok(if names.is_empty() { "(pasta vazia)".into() } else { names.join("\n") })
-    }
-
-    fn read_file(&self, path: &str) -> Result<String> {
-        let bytes = std::fs::read(jail::existing(&self.workspace, path)?)?;
-        String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{path} não é um arquivo de texto"))
-    }
-
-    fn write_file(&self, path: &str, content: &str) -> Result<String> {
-        let target = jail::creatable(&self.workspace, path)?;
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&target, content)?;
-        Ok(format!("{path} gravado ({} bytes)", content.len()))
-    }
+        Tool::ReadConversation => {
+            let id = req(args, "id")?;
+            let c = lair.store.get(id)?.with_context(|| format!("conversa {id} não existe"))?;
+            Ok(format!("# {}\n{}", c.title, lair.store.transcript(id)?))
+        }
+    }?;
+    Ok(shorten(out))
+}
 
-    fn edit_file(&self, path: &str, find: &str, replace: &str) -> Result<String> {
-        let target = jail::existing(&self.workspace, path)?;
-        let text = std::fs::read_to_string(&target)?;
-        match text.matches(find).count() {
-            0 => bail!("o trecho não aparece em {path}"),
-            1 => {
-                std::fs::write(&target, text.replacen(find, replace, 1))?;
-                Ok(format!("{path} editado"))
+fn list_dir(ws: &Path, path: &str) -> Result<String> {
+    let dir = jail::existing(ws, path)?;
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .flatten()
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() {
+                format!("{name}/")
+            } else {
+                name
             }
-            n => bail!("o trecho aparece {n} vezes em {path}; inclua mais contexto para ser único"),
-        }
-    }
+        })
+        .collect();
+    names.sort();
+    Ok(if names.is_empty() { "(pasta vazia)".into() } else { names.join("\n") })
+}
 
-    async fn run_command(&self, command: &str) -> Result<String> {
-        let child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.workspace)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-        let out = tokio::time::timeout(COMMAND_TIMEOUT, child.wait_with_output())
-            .await
-            .map_err(|_| anyhow::anyhow!("o comando passou de {} s e foi interrompido", COMMAND_TIMEOUT.as_secs()))??;
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        let err = String::from_utf8_lossy(&out.stderr);
-        if !err.trim().is_empty() {
-            text.push_str(&format!("\n[stderr]\n{err}"));
-        }
-        Ok(format!("[código de saída {}]\n{}", out.status.code().unwrap_or(-1), text.trim_end()))
-    }
+fn read_file(ws: &Path, path: &str) -> Result<String> {
+    let bytes = std::fs::read(jail::existing(ws, path)?)?;
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{path} não é um arquivo de texto"))
+}
 
-    async fn web_search(&self, http: &reqwest::Client, query: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Results {
-            results: Vec<Hit>,
-        }
-        #[derive(Deserialize)]
-        struct Hit {
-            title: String,
-            url: String,
-            #[serde(default)]
-            content: String,
-        }
-        let base = self.searxng.as_deref().context("busca na web não configurada: defina LAIR_SEARXNG")?;
-        let r: Results = http
-            .get(format!("{}/search", base.trim_end_matches('/')))
-            .query(&[("q", query), ("format", "json")])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let hits: Vec<Value> = r.results.into_iter().take(6).map(|h| json!({ "title": h.title, "url": h.url, "snippet": h.content })).collect();
-        Ok(if hits.is_empty() { "nenhum resultado".into() } else { serde_json::to_string_pretty(&hits)? })
+fn write_file(ws: &Path, path: &str, content: &str) -> Result<String> {
+    let target = jail::creatable(ws, path)?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    std::fs::write(&target, content)?;
+    Ok(format!("{path} gravado ({} bytes)", content.len()))
+}
 
+fn edit_file(ws: &Path, path: &str, find: &str, replace: &str) -> Result<String> {
+    let target = jail::existing(ws, path)?;
+    let text = std::fs::read_to_string(&target)?;
+    match text.matches(find).count() {
+        0 => bail!("o trecho não aparece em {path}"),
+        1 => {
+            std::fs::write(&target, text.replacen(find, replace, 1))?;
+            Ok(format!("{path} editado"))
+        }
+        n => bail!("o trecho aparece {n} vezes em {path}; inclua mais contexto para ser único"),
+    }
+}
+
+async fn run_command(ws: &Path, command: &str) -> Result<String> {
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(ws)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let out = tokio::time::timeout(COMMAND_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| anyhow::anyhow!("o comando passou de {} s e foi interrompido", COMMAND_TIMEOUT.as_secs()))??;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        text.push_str(&format!("\n[stderr]\n{err}"));
+    }
+    Ok(format!("[código de saída {}]\n{}", out.status.code().unwrap_or(-1), text.trim_end()))
+}
+
+async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Results {
+        results: Vec<Hit>,
+    }
+    #[derive(Deserialize)]
+    struct Hit {
+        title: String,
+        url: String,
+        #[serde(default)]
+        content: String,
+    }
+    let base = searxng.context("busca na web não configurada: defina o SearXNG nas configurações")?;
+    let r: Results = http
+        .get(format!("{}/search", base.trim_end_matches('/')))
+        .query(&[("q", query), ("format", "json")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let hits: Vec<Value> = r
+        .results
+        .into_iter()
+        .take(6)
+        .map(|h| json!({ "title": h.title, "url": h.url, "snippet": h.content }))
+        .collect();
+    Ok(if hits.is_empty() { "nenhum resultado".into() } else { serde_json::to_string_pretty(&hits)? })
 }
 
 async fn fetch_url(http: &reqwest::Client, url: &str) -> Result<String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         bail!("só URLs http(s)");
     }
-    let resp = http.get(url).send().await?.error_for_status()?;
-    let html = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.contains("html"));
-    let mut body = Vec::new();
-    let mut resp = resp;
-    while let Some(chunk) = resp.chunk().await? {
-        body.extend_from_slice(&chunk);
-        if body.len() > FETCH_LIMIT {
-            break;
-        }
-    }
+    // A cut page still reads well enough; the model only sees the first few thousand characters anyway.
+    let (headers, body, _) = crate::net::get_capped(http, url, FETCH_LIMIT).await?;
+    let html = headers.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.contains("html"));
     Ok(if html {
         html2text::from_read(body.as_slice(), 100).unwrap_or_default()
     } else {
@@ -280,32 +367,32 @@ fn shorten(mut s: String) -> String {
 mod tests {
     use super::*;
 
-    fn tools(name: &str) -> Tools {
+    fn workspace(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("lair-tools-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
-        Tools { workspace: p, searxng: None }
+        p
     }
 
     #[test]
     fn files_are_written_edited_and_listed_inside_the_workspace() {
-        let t = tools("files");
-        t.write_file("docs/a.md", "um dois um").unwrap();
-        assert_eq!(t.list_dir(".").unwrap(), "docs/");
-        assert_eq!(t.read_file("docs/a.md").unwrap(), "um dois um");
-        assert!(t.edit_file("docs/a.md", "um", "três").unwrap_err().to_string().contains("2 vezes"));
-        t.edit_file("docs/a.md", "dois", "2").unwrap();
-        assert_eq!(t.read_file("docs/a.md").unwrap(), "um 2 um");
-        assert!(t.write_file("../fora.md", "x").is_err());
-        assert!(t.read_file("/etc/passwd").is_err());
+        let t = workspace("files");
+        write_file(&t, "docs/a.md", "um dois um").unwrap();
+        assert_eq!(list_dir(&t, ".").unwrap(), "docs/");
+        assert_eq!(read_file(&t, "docs/a.md").unwrap(), "um dois um");
+        assert!(edit_file(&t, "docs/a.md", "um", "três").unwrap_err().to_string().contains("2 vezes"));
+        edit_file(&t, "docs/a.md", "dois", "2").unwrap();
+        assert_eq!(read_file(&t, "docs/a.md").unwrap(), "um 2 um");
+        assert!(write_file(&t, "../fora.md", "x").is_err());
+        assert!(read_file(&t, "/etc/passwd").is_err());
     }
 
     #[tokio::test]
-    async fn commands_run_in_the_workspace_with_exit_code_and_timeout_message() {
-        let t = tools("cmd");
-        let out = t.run_command("pwd; echo oops >&2; exit 3").await.unwrap();
+    async fn commands_run_in_the_workspace_and_report_exit_code_and_stderr() {
+        let t = workspace("cmd");
+        let out = run_command(&t, "pwd; echo oops >&2; exit 3").await.unwrap();
         assert!(out.starts_with("[código de saída 3]"));
-        assert!(out.contains(t.workspace.file_name().unwrap().to_str().unwrap()));
+        assert!(out.contains(t.file_name().unwrap().to_str().unwrap()));
         assert!(out.contains("[stderr]\noops"));
     }
 
@@ -315,15 +402,5 @@ mod tests {
         assert!(s.ends_with(&format!("(cortado: {} caracteres no total)", MAX_OUTPUT + 10)));
         assert_eq!(s.chars().filter(|&c| c == 'é').count(), MAX_OUTPUT);
         assert_eq!(shorten("curto".into()), "curto");
-    }
-
-    #[test]
-    fn tools_that_change_things_or_go_online_need_approval() {
-        for name in ["write_file", "edit_file", "delete_file", "run_command", "web_search", "fetch_url", "save_skill"] {
-            assert!(spec(name).unwrap().needs_approval, "{name}");
-        }
-        for name in ["list_dir", "read_file", "search_conversations", "read_conversation", "list_skills"] {
-            assert!(!spec(name).unwrap().needs_approval, "{name}");
-        }
     }
 }

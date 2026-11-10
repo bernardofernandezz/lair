@@ -5,10 +5,8 @@ use anyhow::Result;
 use crate::engine::{Engine, Msg, Params, Part};
 
 pub fn run(engine: &mut Engine, model: &str, params: Params, system: Option<String>) -> Result<()> {
-    let base: Vec<Msg> = system
-        .map(|s| Msg { role: "system".into(), content: s })
-        .into_iter()
-        .collect();
+    let base: Vec<Msg> =
+        system.map(|s| Msg { role: "system".into(), content: s, ..Default::default() }).into_iter().collect();
     let mut history = base.clone();
     let (dim, reset) = if io::stdout().is_terminal() { ("\x1b[2m", "\x1b[0m") } else { ("", "") };
     println!("Chatting with {model}. /reset clears history, /exit quits.");
@@ -29,7 +27,7 @@ pub fn run(engine: &mut Engine, model: &str, params: Params, system: Option<Stri
                 println!("(history cleared)");
                 continue;
             }
-            text => history.push(Msg { role: "user".into(), content: text.into() }),
+            text => history.push(Msg { role: "user".into(), content: text.into(), ..Default::default() }),
         }
 
         let mut reply = String::new();
@@ -61,7 +59,7 @@ pub fn run(engine: &mut Engine, model: &str, params: Params, system: Option<Stri
         println!();
         match res {
             // Reasoning stays out of the history, as chat templates expect.
-            Ok(_) => history.push(Msg { role: "assistant".into(), content: reply }),
+            Ok(_) => history.push(Msg { role: "assistant".into(), content: reply, ..Default::default() }),
             Err(e) => {
                 eprintln!("error: {e:#}");
                 history.pop();

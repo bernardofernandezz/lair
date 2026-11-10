@@ -3,6 +3,9 @@ import type { Ref, SkillInfo, StoredMessage, ToolCall, ToolResult, ToolStatus } 
 export type ToolStep = {
   id: string;
   name: string;
+  label: string;
+  /** The argument that says what the step is about: a path, a command, a query… */
+  subject: string;
   arguments: Record<string, unknown>;
   needsApproval: boolean;
   /** `pending` waits for the user; `running` is executing. */
@@ -29,10 +32,11 @@ export function addText(t: AssistantTurn, text: string) {
   else t.parts.push({ kind: "text", text });
 }
 
-export function addCall(t: AssistantTurn, c: ToolCall) {
+/** A tool step joins the reply; `waits` when it needs the user's approval before it runs. */
+export function addCall(t: AssistantTurn, c: Omit<ToolCall, "needs_approval">, waits = false) {
   t.parts.push({
     kind: "tool",
-    step: { id: c.id, name: c.name, arguments: c.arguments ?? {}, needsApproval: c.needs_approval, status: c.needs_approval ? "pending" : "running" },
+    step: { id: c.id, name: c.name, label: c.label || c.name, subject: c.subject ?? "", arguments: c.arguments ?? {}, needsApproval: waits, status: waits ? "pending" : "running" },
   });
 }
 
@@ -66,8 +70,8 @@ export function fromStored(messages: StoredMessage[]): Turn[] {
     if (m.reasoning) reply.reasoning = (reply.reasoning ? reply.reasoning + "\n\n" : "") + m.reasoning;
     if (m.skill) reply.skill = m.skill;
     if (m.role === "tool" && m.tool) {
-      addCall(reply, { ...m.tool, needs_approval: false });
-      setResult(reply, m.tool);
+      addCall(reply, m.tool);
+      setResult(reply, { id: m.tool.id, status: m.tool.status, output: m.content });
     } else if (m.content) {
       addText(reply, (reply.parts.at(-1)?.kind === "text" ? "\n\n" : "") + m.content);
     }

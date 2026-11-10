@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AuthError, ServerStopped, type Api, type Conversation, type Effort, type ModelInfo, type Ref } from "./api";
+import { AuthError, ConnectionLost, type Api, type Conversation, type Effort, type ModelInfo, type Ref } from "./api";
 import { Composer } from "./Composer";
 import { isEffort, ModelPicker, ReasoningControl } from "./Controls";
 import type { OrbSignal } from "./Orb";
@@ -10,6 +10,10 @@ import { addCall, addText, emptyReply, fromStored, setResult, snapshot, type Tur
 type Props = {
   api: Api;
   models: ModelInfo[];
+  /** The server's reasoning level, used until the user picks one for this conversation. */
+  defaultEffort: Effort;
+  /** Opens another conversation in place. */
+  onOpen: (id: string) => void;
   /** `null` for a new conversation, created on the first message. */
   conversationId: string | null;
   conversations: Conversation[];
@@ -21,15 +25,16 @@ type Props = {
   onAuthLost: () => void;
 };
 
-export function Chat({ api, models: initialModels, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost }: Props) {
+export function Chat({ api, models: initialModels, defaultEffort, onOpen, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost }: Props) {
   const [models, setModels] = useState(initialModels);
   const [model, setModel] = useState(() => {
     const saved = load("model");
     return (initialModels.find((m) => m.id === saved) ?? initialModels.find((m) => m.loaded) ?? initialModels[0]).id;
   });
-  const [effort, setEffort] = useState<Effort>(() => {
+  // `null` until the user picks a level: the server then applies its configured default.
+  const [effort, setEffort] = useState<Effort | null>(() => {
     const saved = load("effort");
-    return isEffort(saved) ? saved : "high";
+    return isEffort(saved) ? saved : null;
   });
   const [agent, setAgent] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -47,7 +52,7 @@ export function Chat({ api, models: initialModels, conversationId, conversations
   useEffect(() => onActive(active), [active, onActive]);
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => save("model", model), [model]);
-  useEffect(() => save("effort", effort), [effort]);
+  useEffect(() => save("effort", effort ?? ""), [effort]);
 
   useEffect(() => {
     if (!conversationId) return;
@@ -85,42 +90,41 @@ export function Chat({ api, models: initialModels, conversationId, conversations
         conv.current = (await api.create({ model, effort, agent })).id;
         onCreated(conv.current);
       }
-      await api.turn(conv.current, { content: text, refs: refs.map((r) => r.id), model, effort, agent }, ctl.signal, {
-        skill: (s) => {
-          reply.skill = s;
-          show();
-        },
-        thinking: (t) => {
-          thinkStart ||= performance.now();
-          reply.reasoning += t;
-          signal.current.thinking = true;
-          signal.current.pulse = Math.min(1.6, signal.current.pulse + 0.3);
-          show();
-        },
-        answer: (t) => {
-          if (thinkStart && reply.thinkMs === undefined) reply.thinkMs = performance.now() - thinkStart;
-          addText(reply, t);
-          signal.current.thinking = false;
-          signal.current.pulse = Math.min(1.6, signal.current.pulse + 0.3);
-          show();
-        },
-        toolCall: (call) => {
-          addCall(reply, call);
-          show();
-        },
-        toolResult: (result) => {
-          setResult(reply, result);
-          signal.current.pulse = Math.min(1.6, signal.current.pulse + 0.6);
-          show();
-        },
-        done: () => {},
+      const sig = signal.current;
+      await api.turn(conv.current, { content: text, refs: refs.map((r) => r.id), model, effort: effort ?? undefined, agent }, ctl.signal, (e) => {
+        switch (e.event) {
+          case "skill":
+            reply.skill = e.data;
+            break;
+          case "thinking":
+            thinkStart ||= performance.now();
+            reply.reasoning += e.data.text;
+            sig.thinking = true;
+            sig.pulse = Math.min(1.6, sig.pulse + 0.3);
+            break;
+          case "answer":
+            if (thinkStart && reply.thinkMs === undefined) reply.thinkMs = performance.now() - thinkStart;
+            addText(reply, e.data.text);
+            sig.thinking = false;
+            sig.pulse = Math.min(1.6, sig.pulse + 0.3);
+            break;
+          case "tool_call":
+            addCall(reply, e.data, e.data.needs_approval);
+            break;
+          case "tool_result":
+            setResult(reply, e.data);
+            sig.pulse = Math.min(1.6, sig.pulse + 0.6);
+            break;
+          case "done":
+            return;
+        }
+        show();
       });
     } catch (e) {
       if (e instanceof AuthError) return onAuthLost();
       // The server already saved the question, so it stays on screen; only an empty reply is dropped.
       if (reply.parts.length === 0 && !reply.reasoning) setTurns(before);
-      // fetch rejects with a TypeError when the connection itself fails: the server went away mid-turn.
-      if ((e instanceof TypeError || e instanceof ServerStopped) && !ctl.signal.aborted) recover();
+      if (e instanceof ConnectionLost) recover();
       else if (!ctl.signal.aborted) setError(`Não foi possível responder: ${(e as Error).message}`);
     } finally {
       signal.current.thinking = false;
@@ -169,6 +173,7 @@ export function Chat({ api, models: initialModels, conversationId, conversations
           live={busy}
           loading={!current.loaded && current.id}
           onDecide={(id, allow, always) => api.approve(id, { allow, always }).catch((e) => setError((e as Error).message))}
+          onOpen={onOpen}
         />
         {error && (
           <p className="error" role="alert">
@@ -188,7 +193,7 @@ export function Chat({ api, models: initialModels, conversationId, conversations
         tools={
           <>
             <ModelPicker models={models} value={model} onChange={setModel} disabled={busy} />
-            <ReasoningControl value={effort} onChange={setEffort} available={current.thinks} />
+            <ReasoningControl value={effort ?? defaultEffort} onChange={setEffort} available={current.thinks} />
             <button
               type="button"
               className={`chip agent-toggle${agent ? " is-on" : ""}`}

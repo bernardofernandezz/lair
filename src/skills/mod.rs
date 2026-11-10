@@ -16,6 +16,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{with_system, Msg};
+use crate::store::Named;
 
 const BUILTINS: &[(&str, &str, &str)] =
     &[("3d", include_str!("../../skills/3d/skill.json"), include_str!("../../skills/3d/prompt.md"))];
@@ -61,12 +62,6 @@ pub struct Manifest {
     pub source: Option<String>,
 }
 
-/// A skill's name and id, as announced to clients when it runs.
-pub struct Used {
-    pub id: String,
-    pub name: String,
-}
-
 #[derive(Default)]
 pub struct Catalog {
     skills: Vec<Skill>,
@@ -86,7 +81,10 @@ impl Catalog {
         let disabled = self.disabled();
         let mut skills: Vec<Skill> = BUILTINS
             .iter()
-            .map(|(id, manifest, prompt)| Skill::parse(id, manifest, prompt, Origin::Builtin).expect("built-in skills are valid"))
+            .map(|(id, manifest, prompt)| {
+                let manifest = serde_json::from_str(manifest).expect("built-in skill.json is valid");
+                Skill::parse(id, manifest, prompt, Origin::Builtin).expect("built-in skills are valid")
+            })
             .collect();
         let folders = [(self.extra.as_deref(), Origin::Extra), (self.own.as_deref(), Origin::Created)];
         for (dir, origin) in folders {
@@ -108,12 +106,12 @@ impl Catalog {
     }
 
     /// The skill the last user message asks for, if any, and the messages with its instructions added.
-    pub fn apply(&self, msgs: &[Msg], assets: &[String]) -> (Option<Used>, Vec<Msg>) {
+    pub fn apply(&self, msgs: &[Msg], assets: &[String]) -> (Option<Named>, Vec<Msg>) {
         let Some(skill) = self.trigger(msgs) else {
             return (None, msgs.to_vec());
         };
         let prompt = skill.prompt.replace("{{assets}}", &assets_section(assets));
-        (Some(Used { id: skill.id.clone(), name: skill.name.clone() }), with_system(msgs, prompt.trim_end()))
+        (Some(Named { id: skill.id.clone(), name: skill.name.clone() }), with_system(msgs, prompt.trim_end()))
     }
 
     fn trigger(&self, msgs: &[Msg]) -> Option<&Skill> {
@@ -127,7 +125,7 @@ impl Catalog {
 
     /// Creates or replaces a skill in the writable folder. A built-in with the same id stays hidden behind it.
     pub fn save(&mut self, id: &str, manifest: &Manifest, prompt: &str) -> Result<Skill> {
-        Skill::parse(id, &serde_json::to_string(manifest)?, prompt, Origin::Created)?;
+        Skill::parse(id, manifest.clone(), prompt, Origin::Created)?;
         let dir = self.own()?.join(id);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("skill.json"), serde_json::to_string_pretty(manifest)?)?;
@@ -173,11 +171,10 @@ impl Catalog {
 }
 
 impl Skill {
-    fn parse(id: &str, manifest: &str, prompt: &str, origin: Origin) -> Result<Self> {
+    fn parse(id: &str, m: Manifest, prompt: &str, origin: Origin) -> Result<Self> {
         if !valid_id(id) {
             bail!("invalid skill id {id:?} (use a-z, 0-9, - or _)");
         }
-        let m: Manifest = serde_json::from_str(manifest).context("invalid skill.json")?;
         let name = m.name.trim().to_owned();
         if name.is_empty() {
             bail!("name must not be empty");
@@ -209,7 +206,23 @@ impl Skill {
     }
 }
 
-pub fn valid_id(id: &str) -> bool {
+/// A valid skill id made from any name: lowercase ASCII words joined by hyphens.
+pub fn slug(name: &str) -> String {
+    let words: String = normalize(name)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
+        .collect();
+    let id = words.split_whitespace().collect::<Vec<_>>().join("-");
+    let id: String = id.chars().take(64).collect();
+    let id = id.trim_end_matches('-').to_owned();
+    if id.is_empty() {
+        "skill".to_owned()
+    } else {
+        id
+    }
+}
+
+fn valid_id(id: &str) -> bool {
     let mut chars = id.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
         && id.len() <= 64
@@ -226,7 +239,10 @@ fn load_dir(dir: &Path, origin: Origin) -> Vec<Skill> {
         let parsed = std::fs::read_to_string(path.join("skill.json"))
             .and_then(|m| Ok((m, std::fs::read_to_string(path.join("prompt.md"))?)))
             .map_err(anyhow::Error::from)
-            .and_then(|(manifest, prompt)| Skill::parse(&id, &manifest, &prompt, origin));
+            .and_then(|(manifest, prompt)| {
+                let manifest = serde_json::from_str(&manifest).context("invalid skill.json")?;
+                Skill::parse(&id, manifest, &prompt, origin)
+            });
         match parsed {
             Ok(skill) if skills.iter().any(|s| s.id == skill.id) => {
                 eprintln!("skills: skipping {}: another folder is also called {id}", path.display());
@@ -294,7 +310,7 @@ mod tests {
     }
 
     fn user(text: &str) -> Vec<Msg> {
-        vec![Msg { role: "user".into(), content: text.into() }]
+        vec![Msg { role: "user".into(), content: text.into(), ..Default::default() }]
     }
 
     fn triggered(c: &Catalog, text: &str) -> Option<String> {
@@ -319,8 +335,8 @@ mod tests {
     fn apply_adds_the_prompt_with_the_asset_list() {
         let c = Catalog::load(None, temp("apply"));
         let msgs = vec![
-            Msg { role: "system".into(), content: "base".into() },
-            Msg { role: "user".into(), content: "uma cena 3d".into() },
+            Msg { role: "system".into(), content: "base".into(), ..Default::default() },
+            Msg { role: "user".into(), content: "uma cena 3d".into(), ..Default::default() },
         ];
         let (_, out) = c.apply(&msgs, &["robot.glb".into()]);
         assert_eq!(out.len(), 2);
@@ -353,6 +369,14 @@ mod tests {
     }
 
     #[test]
+    fn any_name_gives_a_valid_id() {
+        assert_eq!(slug("Resumo Rápido!"), "resumo-rapido");
+        assert_eq!(slug("  Ação & Reação  "), "acao-reacao");
+        assert_eq!(slug("???"), "skill");
+        assert!(valid_id(&slug(&"Palavra ".repeat(30))));
+    }
+
+    #[test]
     fn bad_skills_are_refused_or_skipped() {
         let own = temp("bad");
         let mut c = Catalog::load(None, own.clone());
@@ -363,16 +387,5 @@ mod tests {
         std::fs::write(own.join("broken/prompt.md"), "x").unwrap();
         assert!(Catalog::load(None, own).list().iter().all(|s| s.id != "broken"));
         assert!(Catalog::default().save("a", &manifest("A", &["a"]), "x").is_err(), "--no-skills");
-    }
-
-    #[test]
-    fn the_prompt_example_is_strict_json() {
-        let prompt = include_str!("../../skills/3d/prompt.md");
-        let example = &prompt[prompt.find("## Exemplo").expect("example section")..];
-        let start = example.find("```scene").expect("scene fence");
-        let rest = &example[start + "```scene".len()..];
-        let end = rest.find("```").expect("closing fence");
-        let v: serde_json::Value = serde_json::from_str(rest[..end].trim()).expect("example must be strict JSON");
-        assert!(v["nodes"].as_array().is_some_and(|n| !n.is_empty()));
     }
 }

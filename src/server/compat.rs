@@ -15,8 +15,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
 use super::{error, now, AppState};
-use crate::engine::{Msg, Params, Reasoning};
-use crate::models::Event;
+use crate::engine::{Event, Finish, Msg, Params, Reasoning};
 
 #[derive(Deserialize)]
 pub struct ChatRequest {
@@ -37,7 +36,13 @@ pub async fn models(State(s): State<Arc<AppState>>) -> Json<Value> {
         .models
         .list()
         .into_iter()
-        .map(|m| json!({ "id": m.id, "object": "model", "owned_by": m.node.as_deref().unwrap_or("local"), "node": m.node, "thinks": m.thinks, "loaded": m.loaded }))
+        .map(|m| {
+            let owner = m.node.clone().unwrap_or_else(|| "local".into());
+            let mut v = json!(m);
+            v["object"] = json!("model");
+            v["owned_by"] = json!(owner);
+            v
+        })
         .collect();
     Json(json!({ "object": "list", "data": data }))
 }
@@ -51,7 +56,7 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         Some(id) => return error(StatusCode::NOT_FOUND, format!("model {id} not found")),
         None => s.lair.models.default_id(),
     };
-    let d = s.lair.defaults;
+    let d = s.lair.params();
     let params = Params {
         temperature: req.temperature.unwrap_or(d.temperature),
         top_p: req.top_p.unwrap_or(d.top_p),
@@ -60,7 +65,6 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         reasoning: req.reasoning_effort.unwrap_or(d.reasoning),
     };
     let (skill, messages) = s.lair.skills.read().unwrap().apply(&req.messages, s.lair.assets.ids());
-    let skill = skill.map(|k| json!({ "id": k.id, "name": k.name }));
     let mut rx = s.lair.models.generate(&model, messages, params);
     let created = now();
     let id = format!("chatcmpl-{created}");
@@ -69,11 +73,13 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         let (mut reasoning, mut content) = (String::new(), String::new());
         let done = loop {
             match rx.recv().await {
-                Some(Event::Thinking(t)) => reasoning.push_str(&t),
-                Some(Event::Answer(t)) => content.push_str(&t),
+                Some(Event::Thinking { text }) => reasoning.push_str(&text),
+                Some(Event::Answer { text }) => content.push_str(&text),
                 Some(Event::Done(done)) => break done,
-                Some(Event::Failed(e)) => return error(StatusCode::BAD_REQUEST, e),
-                None => return error(StatusCode::INTERNAL_SERVER_ERROR, "generation ended unexpectedly"),
+                Some(Event::Failed { message }) => return error(StatusCode::BAD_REQUEST, message),
+                None => {
+                    return error(StatusCode::INTERNAL_SERVER_ERROR, "generation ended unexpectedly");
+                }
             }
         };
         let mut message = json!({ "role": "assistant", "content": content });
@@ -92,19 +98,18 @@ pub async fn chat_completions(State(s): State<Arc<AppState>>, Json(req): Json<Ch
         return Json(body).into_response();
     }
 
-    let chunk = move |delta: Value, finish: Option<&str>| {
+    let chunk = move |delta: Value, finish: Option<Finish>| {
         json!({ "id": id, "object": "chat.completion.chunk", "created": created, "model": model,
                 "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }] })
     };
     let first = chunk(json!({ "role": "assistant" }), None);
-    // Dropping the stream (client disconnected) drops `rx`, which stops the generation.
     let body = UnboundedReceiverStream::new(rx).map(move |e| match e {
-        Event::Thinking(t) => chunk(json!({ "reasoning_content": t }), None),
-        Event::Answer(t) => chunk(json!({ "content": t }), None),
+        Event::Thinking { text } => chunk(json!({ "reasoning_content": text }), None),
+        Event::Answer { text } => chunk(json!({ "content": text }), None),
         Event::Done(done) => chunk(json!({}), Some(done.finish_reason)),
-        Event::Failed(e) => json!({ "error": { "message": e } }),
+        Event::Failed { message } => json!({ "error": { "message": message } }),
     });
-    let skill_event = skill.map(|k| sse::Event::default().event("lair.skill").data(k.to_string()));
+    let skill_event = skill.map(|k| sse::Event::default().event("lair.skill").data(json!(k).to_string()));
     let events = tokio_stream::iter(skill_event)
         .chain(tokio_stream::once(first).chain(body).map(|v| sse::Event::default().data(v.to_string())))
         .chain(tokio_stream::once(sse::Event::default().data("[DONE]")))

@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import type { Effort, ModelInfo } from "./api";
-
-/** The model's own name; a peer's models are listed as `name@node`. */
-const modelName = (m: ModelInfo) => (m.node ? m.id.slice(0, -(m.node.length + 1)) : m.id);
+import { modelName, type Effort, type ModelInfo } from "./api";
 
 type PickerProps = { models: ModelInfo[]; value: string; onChange: (id: string) => void; disabled: boolean };
 
@@ -103,7 +100,7 @@ export function ModelPicker({ models, value, onChange, disabled }: PickerProps) 
 
 export const isEffort = (v: string): v is Effort => MODES.some((m) => m.value === v);
 
-const MODES: { value: Effort; label: string; hint: string }[] = [
+export const MODES: { value: Effort; label: string; hint: string }[] = [
   { value: "none", label: "Desligado", hint: "Responde direto, sem pensar" },
   { value: "low", label: "Leve", hint: "Pensa um pouco antes de responder" },
   { value: "high", label: "Profundo", hint: "Pensa o quanto precisar" },

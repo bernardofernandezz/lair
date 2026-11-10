@@ -8,7 +8,7 @@ use std::io::{Cursor, Read};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::Manifest;
+use super::{slug, Manifest};
 
 /// A zip for one skill.
 const ZIP_LIMIT: usize = 1024 * 1024;
@@ -47,7 +47,12 @@ fn classify(url: &str) -> Result<Kind> {
     if let Some(gh) = rest.strip_prefix("github.com/") {
         let parts: Vec<&str> = gh.trim_end_matches('/').split('/').collect();
         return match parts.as_slice() {
-            [owner, repo] => Ok(Kind::GitHub { owner: owner.to_string(), repo: repo.to_string(), git_ref: "HEAD".into(), path: String::new() }),
+            [owner, repo] => Ok(Kind::GitHub {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                git_ref: "HEAD".into(),
+                path: String::new(),
+            }),
             [owner, repo, "tree", git_ref, path @ ..] => Ok(Kind::GitHub {
                 owner: owner.to_string(),
                 repo: repo.to_string(),
@@ -60,11 +65,10 @@ fn classify(url: &str) -> Result<Kind> {
     Ok(if rest.split(['?', '#']).next().unwrap_or("").ends_with(".zip") { Kind::Zip } else { Kind::Folder })
 }
 
-/// Last path segment of a URL, used as the id when nothing better names the skill.
+/// The id from the last path segment of a URL or file name, when nothing better names the skill.
 fn last_segment(url: &str) -> String {
     let path = url.split(['?', '#']).next().unwrap_or(url).trim_end_matches('/');
-    let name = path.rsplit('/').next().unwrap_or("skill");
-    name.trim_end_matches(".zip").to_ascii_lowercase()
+    slug(path.rsplit('/').next().unwrap_or_default().trim_end_matches(".zip"))
 }
 
 /// Finds `skill.json` + `prompt.md` in a zip. With `under`, only inside that folder (a GitHub
@@ -81,7 +85,11 @@ fn from_zip(bytes: &[u8], under: Option<&str>, fallback_id: &str) -> Result<Fetc
     let manifest_path = names
         .iter()
         .filter(|n| n.ends_with("skill.json") && (n.len() == "skill.json".len() || n.ends_with("/skill.json")))
-        .filter(|n| under.is_none_or(|dir| strip(n) == if dir.is_empty() { "skill.json".to_owned() } else { format!("{dir}/skill.json") }))
+        .filter(|n| {
+            under.is_none_or(|dir| {
+                strip(n) == if dir.is_empty() { "skill.json".to_owned() } else { format!("{dir}/skill.json") }
+            })
+        })
         .min_by_key(|n| n.matches('/').count())
         .context("no skill.json found in the download")?
         .clone();
@@ -97,18 +105,15 @@ fn from_zip(bytes: &[u8], under: Option<&str>, fallback_id: &str) -> Result<Fetc
     };
     let manifest: Manifest = serde_json::from_str(&read(&manifest_path)?).context("invalid skill.json")?;
     let prompt = read(&format!("{dir}prompt.md"))?;
-    let folder = dir.trim_end_matches('/').rsplit('/').next().filter(|f| !f.is_empty() && under.is_none_or(|u| !u.is_empty()));
-    Ok(Fetched { id: folder.map_or_else(|| fallback_id.to_owned(), str::to_ascii_lowercase), manifest, prompt })
+    let folder =
+        dir.trim_end_matches('/').rsplit('/').next().filter(|f| !f.is_empty() && under.is_none_or(|u| !u.is_empty()));
+    Ok(Fetched { id: folder.map_or_else(|| fallback_id.to_owned(), slug), manifest, prompt })
 }
 
 async fn download(http: &reqwest::Client, url: &str, limit: usize) -> Result<Vec<u8>> {
-    let mut resp = http.get(url).send().await?.error_for_status()?;
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await? {
-        body.extend_from_slice(&chunk);
-        if body.len() > limit {
-            bail!("the download is larger than {} MB", limit / (1024 * 1024));
-        }
+    let (_, body, cut) = crate::net::get_capped(http, url, limit).await?;
+    if cut {
+        bail!("the download is larger than {} KB", limit / 1024);
     }
     Ok(body)
 }
@@ -124,13 +129,16 @@ pub async fn fetch(http: &reqwest::Client, url: &str) -> Result<Fetched> {
     let mut fetched = match classify(url)? {
         Kind::Zip => from_zip(&download(http, url, ZIP_LIMIT).await?, None, &last_segment(url))?,
         Kind::GitHub { owner, repo, git_ref, path } => {
-            let archive = download(http, &format!("https://codeload.github.com/{owner}/{repo}/zip/{git_ref}"), REPO_LIMIT).await?;
+            let archive =
+                download(http, &format!("https://codeload.github.com/{owner}/{repo}/zip/{git_ref}"), REPO_LIMIT)
+                    .await?;
             let id = if path.is_empty() { repo.to_ascii_lowercase() } else { last_segment(&path) };
             from_zip(&archive, Some(&path), &id)?
         }
         Kind::Folder => {
             let base = url.trim_end_matches('/');
-            let manifest = serde_json::from_str(&text(http, &format!("{base}/skill.json")).await?).context("invalid skill.json")?;
+            let manifest = serde_json::from_str(&text(http, &format!("{base}/skill.json")).await?)
+                .context("invalid skill.json")?;
             Fetched { id: last_segment(base), manifest, prompt: text(http, &format!("{base}/prompt.md")).await? }
         }
     };
@@ -144,7 +152,8 @@ pub async fn index(http: &reqwest::Client, url: &str) -> Result<Vec<IndexEntry>>
     struct Index {
         skills: Vec<IndexEntry>,
     }
-    let index: Index = serde_json::from_str(&text(http, url).await?).context("the skills index is not in the expected format")?;
+    let index: Index =
+        serde_json::from_str(&text(http, url).await?).context("the skills index is not in the expected format")?;
     Ok(index.skills)
 }
 
@@ -174,14 +183,17 @@ mod tests {
             classify("https://github.com/me/skills/tree/main/pirate").unwrap(),
             Kind::GitHub { owner: "me".into(), repo: "skills".into(), git_ref: "main".into(), path: "pirate".into() }
         );
-        assert!(matches!(classify("https://github.com/me/pirate").unwrap(), Kind::GitHub { git_ref, path, .. } if git_ref == "HEAD" && path.is_empty()));
+        assert!(
+            matches!(classify("https://github.com/me/pirate").unwrap(), Kind::GitHub { git_ref, path, .. } if git_ref == "HEAD" && path.is_empty())
+        );
         assert!(classify("ftp://x").is_err());
         assert!(classify("https://github.com/me").is_err());
     }
 
     #[test]
     fn a_zip_skill_is_found_at_its_shallowest_folder() {
-        let z = zip_of(&[("pirate/skill.json", MANIFEST), ("pirate/prompt.md", "Arr."), ("pirate/extra/skill.json", "{}")]);
+        let z =
+            zip_of(&[("pirate/skill.json", MANIFEST), ("pirate/prompt.md", "Arr."), ("pirate/extra/skill.json", "{}")]);
         let f = from_zip(&z, None, "fallback").unwrap();
         assert_eq!((f.id.as_str(), f.manifest.name.as_str(), f.prompt.as_str()), ("pirate", "Pirata", "Arr."));
         let flat = from_zip(&zip_of(&[("skill.json", MANIFEST), ("prompt.md", "Arr.")]), None, "pirate-zip").unwrap();

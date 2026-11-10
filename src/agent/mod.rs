@@ -22,7 +22,7 @@ const CLOSE: &str = "</tool_call>";
 /// Tool steps allowed in one reply before lair stops the loop.
 pub const MAX_STEPS: usize = 8;
 /// How long a call waits for the user to approve it.
-pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, PartialEq)]
 pub struct Call {
@@ -86,7 +86,6 @@ impl CallSplit {
                     if start > 0 {
                         out.push(Piece::Text(self.pending[..start].to_owned()));
                     }
-                    // A pythonic call keeps `name(` for the parser; a Hermes call drops its tag.
                     self.pending.drain(..start + if syntax == Syntax::Hermes { len } else { 1 });
                     self.inside = Some(syntax);
                 }

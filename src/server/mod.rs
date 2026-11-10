@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{sse as axum_sse, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_embed::RustEmbed;
@@ -20,6 +20,7 @@ struct AssetsUi;
 
 mod compat;
 mod native;
+mod settings;
 
 /// How often other lair nodes on the tailnet are looked for.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
@@ -27,14 +28,16 @@ const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
 pub struct AppState {
     pub lair: Arc<Lair>,
     token: Option<String>,
+    /// Where the server listens; the settings UI warns when other machines can't reach it.
+    pub addr: String,
 }
 
 pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Result<()> {
-    let state = Arc::new(AppState { lair: Arc::new(lair), token });
-    let peers = state.lair.models.peers.clone();
+    let state = Arc::new(AppState { lair: Arc::new(lair), token, addr: addr.clone() });
+    let lair = state.lair.clone();
     tokio::spawn(async move {
         loop {
-            peers.refresh().await;
+            lair.peers.refresh(&lair.node_name(), &lair.config().peers).await;
             tokio::time::sleep(PEER_REFRESH).await;
         }
     });
@@ -53,10 +56,10 @@ pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Res
     println!("listening on http://{addr}");
     let stop = async move {
         shutdown().await;
-        // Running turns save what they generated and close their streams.
         lair.stopping.send_replace(true);
     };
-    let server = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(stop);
+    let server =
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(stop);
     tokio::select! {
         r = server => r?,
         // Other streams (a peer's generation, keep-alives) don't end on their own; don't wait on them long.
@@ -67,7 +70,8 @@ pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Res
 
 /// Resolves on Ctrl+C or SIGTERM, which is what `docker stop` sends.
 async fn shutdown() {
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler installs");
+    let mut term =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler installs");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
@@ -76,7 +80,12 @@ async fn shutdown() {
 }
 
 /// With a token set, a request needs it, unless it comes from a machine in this node's tailnet.
-async fn require_token(State(s): State<Arc<AppState>>, ConnectInfo(from): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
+async fn require_token(
+    State(s): State<Arc<AppState>>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
     if let Some(want) = &s.token {
         let bearer = req
             .headers()
@@ -89,7 +98,7 @@ async fn require_token(State(s): State<Arc<AppState>>, ConnectInfo(from): Connec
         let cookie = cookie_value(&req, "lair_asset").unwrap_or_default();
         let ok = constant_time_eq(bearer.as_bytes(), want.as_bytes())
             || constant_time_eq(cookie.as_bytes(), want.as_bytes())
-            || s.lair.models.peers.trusts(from.ip()).await;
+            || (s.lair.config().trust_tailnet() && s.lair.peers.trusts(from.ip()).await);
         if !ok {
             return error(StatusCode::UNAUTHORIZED, "invalid or missing token");
         }
@@ -177,10 +186,8 @@ async fn create_session(State(s): State<Arc<AppState>>) -> Response {
     match &s.token {
         None => StatusCode::NO_CONTENT.into_response(),
         Some(t) => {
-            let cookie = format!(
-                "lair_asset={}; HttpOnly; SameSite=Strict; Path=/v1/assets; Max-Age=604800",
-                percent_encode(t)
-            );
+            let cookie =
+                format!("lair_asset={}; HttpOnly; SameSite=Strict; Path=/v1/assets; Max-Age=604800", percent_encode(t));
             ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
         }
     }
@@ -190,8 +197,40 @@ async fn no_route() -> Response {
     error(StatusCode::NOT_FOUND, "no such API route")
 }
 
+/// One stream item as a server-sent event; see [`crate::sse`].
+fn sse(item: &impl serde::Serialize) -> axum_sse::Event {
+    let (name, data) = crate::sse::frame(item);
+    axum_sse::Event::default().event(name).data(data)
+}
+
 fn error(status: StatusCode, msg: impl ToString) -> Response {
     (status, Json(json!({ "error": { "message": msg.to_string() } }))).into_response()
+}
+
+/// A failed API call. Any error becomes a 500; [`bad`] and [`missing`] say whose fault it was.
+pub struct ApiError(StatusCode, String);
+
+type ApiResult<T> = Result<T, ApiError>;
+
+impl<E: Into<anyhow::Error>> From<E> for ApiError {
+    fn from(e: E) -> Self {
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{:#}", e.into()))
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        error(self.0, self.1)
+    }
+}
+
+/// The request itself was wrong: 400 with the reason.
+fn bad(e: impl Into<anyhow::Error>) -> ApiError {
+    ApiError(StatusCode::BAD_REQUEST, format!("{:#}", e.into()))
+}
+
+fn missing(what: impl ToString) -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, what.to_string())
 }
 
 fn now() -> u64 {

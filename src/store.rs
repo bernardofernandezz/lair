@@ -9,12 +9,14 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::engine::Reasoning;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Conversation {
     pub id: String,
     pub title: String,
     pub model: Option<String>,
-    pub effort: Option<String>,
+    pub effort: Option<Reasoning>,
     pub agent: bool,
     pub created: i64,
     pub updated: i64,
@@ -34,17 +36,49 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub reasoning: Option<String>,
-    pub skill: Option<Value>,
-    pub tool: Option<Value>,
+    /// The skill that shaped this reply.
+    pub skill: Option<Named>,
+    pub tool: Option<ToolStep>,
     pub refs: Vec<Ref>,
     pub created: i64,
+}
+
+/// Something named, kept with a message by id and display name: the skill a reply used.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Named {
+    pub id: String,
+    pub name: String,
+}
+
+/// One agent step: the call as the model wrote it (`raw`), what lair understood, and the result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolStep {
+    pub id: String,
+    pub name: String,
+    /// What the UI calls the tool; steps saved before labels show their name.
+    #[serde(default)]
+    pub label: String,
+    /// The argument that says what the step is about: a path, a command, a query…
+    #[serde(default)]
+    pub subject: String,
+    pub arguments: Value,
+    pub raw: String,
+    pub status: ToolStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolStatus {
+    Ok,
+    Error,
+    Denied,
 }
 
 #[derive(Default, Deserialize)]
 pub struct Settings {
     pub title: Option<String>,
     pub model: Option<String>,
-    pub effort: Option<String>,
+    pub effort: Option<Reasoning>,
     pub agent: Option<bool>,
 }
 
@@ -69,9 +103,13 @@ fn tick(db: &Connection) -> rusqlite::Result<i64> {
     Ok(now().max(latest + 1))
 }
 
+/// The `config` row holding the settings the UI saved, as one JSON document.
+const CONFIG_KEY: &str = "runtime";
+
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL DEFAULT '',
@@ -91,6 +129,10 @@ CREATE TABLE IF NOT EXISTS messages (
     tool TEXT,
     refs TEXT,
     created INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_conv ON messages(conv, id);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
@@ -116,6 +158,24 @@ impl Store {
         Self { db: Mutex::new(db) }
     }
 
+    /// The saved settings document; `{}` before anything was saved.
+    pub fn config(&self) -> Result<Value> {
+        let db = self.db.lock().unwrap();
+        let raw = db
+            .query_row("SELECT value FROM config WHERE key = ?1", [CONFIG_KEY], |r| r.get::<_, String>(0))
+            .optional()?;
+        Ok(raw.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_else(|| Value::Object(Default::default())))
+    }
+
+    pub fn save_config(&self, config: &Value) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![CONFIG_KEY, config.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn list(&self) -> Result<Vec<Conversation>> {
         let db = self.db.lock().unwrap();
         let mut stmt = db.prepare("SELECT * FROM conversations ORDER BY updated DESC")?;
@@ -129,7 +189,7 @@ impl Store {
         let t = tick(&db)?;
         db.execute(
             "INSERT INTO conversations (id, title, model, effort, agent, created, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, s.title.unwrap_or_default(), s.model, s.effort, s.agent.unwrap_or(false), t],
+            params![id, s.title.unwrap_or_default(), s.model, s.effort.map(|e| e.to_string()), s.agent.unwrap_or(false), t],
         )?;
         Ok(db.query_row("SELECT * FROM conversations WHERE id = ?1", [&id], conversation)?)
     }
@@ -146,13 +206,23 @@ impl Store {
         Ok(rows)
     }
 
+    /// The conversation as plain text for a model to read: who said what, without the tool steps.
+    pub fn transcript(&self, id: &str) -> Result<String> {
+        Ok(self
+            .messages(id)?
+            .iter()
+            .filter(|m| m.role != "tool")
+            .map(|m| format!("{}: {}\n", if m.role == "user" { "Usuário" } else { "Assistente" }, m.content))
+            .collect())
+    }
+
     /// Changes the given settings; returns `None` when the conversation does not exist.
     pub fn update(&self, id: &str, s: Settings) -> Result<Option<Conversation>> {
         let db = self.db.lock().unwrap();
         db.execute(
             "UPDATE conversations SET title = coalesce(?2, title), model = coalesce(?3, model),
              effort = coalesce(?4, effort), agent = coalesce(?5, agent) WHERE id = ?1",
-            params![id, s.title, s.model, s.effort, s.agent],
+            params![id, s.title, s.model, s.effort.map(|e| e.to_string()), s.agent],
         )?;
         Ok(db.query_row("SELECT * FROM conversations WHERE id = ?1", [id], conversation).optional()?)
     }
@@ -165,12 +235,13 @@ impl Store {
     pub fn append(&self, conv: &str, m: &Message) -> Result<i64> {
         let db = self.db.lock().unwrap();
         let t = tick(&db)?;
-        let json = |v: &Option<Value>| v.as_ref().map(Value::to_string);
+        let skill = m.skill.as_ref().map(serde_json::to_string).transpose()?;
+        let tool = m.tool.as_ref().map(serde_json::to_string).transpose()?;
         let refs = (!m.refs.is_empty()).then(|| serde_json::to_string(&m.refs)).transpose()?;
         db.execute(
             "INSERT INTO messages (conv, role, content, reasoning, skill, tool, refs, created)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![conv, m.role, m.content, m.reasoning, json(&m.skill), json(&m.tool), refs, t],
+            params![conv, m.role, m.content, m.reasoning, skill, tool, refs, t],
         )?;
         let id = db.last_insert_rowid();
         let title = if m.role == "user" { title_from(&m.content) } else { String::new() };
@@ -225,7 +296,7 @@ fn conversation(r: &Row) -> rusqlite::Result<Conversation> {
         id: r.get("id")?,
         title: r.get("title")?,
         model: r.get("model")?,
-        effort: r.get("effort")?,
+        effort: r.get::<_, Option<String>>("effort")?.and_then(|e| e.parse().ok()),
         agent: r.get("agent")?,
         created: r.get("created")?,
         updated: r.get("updated")?,
@@ -233,17 +304,17 @@ fn conversation(r: &Row) -> rusqlite::Result<Conversation> {
 }
 
 fn message(r: &Row) -> rusqlite::Result<Message> {
-    let json = |col: &str| -> rusqlite::Result<Option<Value>> {
+    fn json<T: serde::de::DeserializeOwned>(r: &Row, col: &str) -> rusqlite::Result<Option<T>> {
         Ok(r.get::<_, Option<String>>(col)?.and_then(|s| serde_json::from_str(&s).ok()))
-    };
+    }
     Ok(Message {
         id: r.get("id")?,
         role: r.get("role")?,
         content: r.get("content")?,
         reasoning: r.get("reasoning")?,
-        skill: json("skill")?,
-        tool: json("tool")?,
-        refs: json("refs")?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default(),
+        skill: json(r, "skill")?,
+        tool: json(r, "tool")?,
+        refs: json(r, "refs")?.unwrap_or_default(),
         created: r.get("created")?,
     })
 }
@@ -261,7 +332,8 @@ mod tests {
         let s = Store::memory();
         let a = s.create(Settings::default()).unwrap();
         let b = s.create(Settings { title: Some("Fixo".into()), ..Default::default() }).unwrap();
-        s.append(&a.id, &user("\n  Como faço pão de fermentação natural em casa, passo a passo, sem batedeira?")).unwrap();
+        s.append(&a.id, &user("\n  Como faço pão de fermentação natural em casa, passo a passo, sem batedeira?"))
+            .unwrap();
         s.append(&b.id, &user("isto não renomeia")).unwrap();
 
         let list = s.list().unwrap();
@@ -269,7 +341,10 @@ mod tests {
         assert_eq!(list[0].title, "Fixo");
         assert_eq!(list[1].title, "Como faço pão de fermentação natural em casa, passo a passo,…");
 
-        let a2 = s.update(&a.id, Settings { model: Some("m".into()), agent: Some(true), ..Default::default() }).unwrap().unwrap();
+        let a2 = s
+            .update(&a.id, Settings { model: Some("m".into()), agent: Some(true), ..Default::default() })
+            .unwrap()
+            .unwrap();
         assert_eq!((a2.model.as_deref(), a2.agent, a2.title.as_str()), (Some("m"), true, list[1].title.as_str()));
         assert!(s.update("nope", Settings::default()).unwrap().is_none());
     }
@@ -282,7 +357,7 @@ mod tests {
             role: "assistant".into(),
             content: "Oi".into(),
             reasoning: Some("pensei".into()),
-            skill: Some(serde_json::json!({"id": "3d"})),
+            skill: Some(Named { id: "3d".into(), name: "3D".into() }),
             ..Default::default()
         };
         let mut question = user("oi");
@@ -294,7 +369,7 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].refs[0].title, "Outra");
         assert_eq!(msgs[1].reasoning.as_deref(), Some("pensei"));
-        assert_eq!(msgs[1].skill.as_ref().unwrap()["id"], "3d");
+        assert_eq!(msgs[1].skill.as_ref().unwrap().id, "3d");
 
         assert!(s.delete(&c.id).unwrap());
         assert!(s.messages(&c.id).unwrap().is_empty());
@@ -315,5 +390,13 @@ mod tests {
         assert!(hits[0].snippet.contains("fermentação"));
         assert_eq!(s.search("japão").unwrap()[0].id, other.id);
         assert!(s.search("\" OR *").unwrap().is_empty(), "FTS syntax in the query is neutralized");
+    }
+
+    #[test]
+    fn config_round_trips() {
+        let s = Store::memory();
+        assert_eq!(s.config().unwrap(), serde_json::json!({}));
+        s.save_config(&serde_json::json!({ "peers": ["doom:8080"] })).unwrap();
+        assert_eq!(s.config().unwrap()["peers"][0], "doom:8080");
     }
 }

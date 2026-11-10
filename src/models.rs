@@ -2,31 +2,10 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::engine::{Done, Engine, ModelInfo, Msg, Params, Part};
+use crate::engine::{Engine, Event, ModelEntry, ModelInfo, Msg, Params, Part};
 use crate::peers::Peers;
-
-/// One streamed piece of a generation. The stream always ends with `Done` or `Failed`.
-#[derive(Debug)]
-pub enum Event {
-    Thinking(String),
-    Answer(String),
-    Done(Done),
-    Failed(String),
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ModelEntry {
-    /// `model` for local ones, `model@node` for a peer's.
-    pub id: String,
-    /// The peer it runs on; `None` here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
-    pub thinks: bool,
-    pub loaded: bool,
-}
 
 pub struct Models {
     // One model on one GPU: run requests one at a time.
@@ -34,17 +13,12 @@ pub struct Models {
     local: Vec<ModelInfo>,
     /// Model in memory after the last generation; readable while the engine is busy.
     loaded: Arc<std::sync::Mutex<Option<String>>>,
-    pub peers: Arc<Peers>,
+    peers: Arc<Peers>,
 }
 
 impl Models {
     pub fn new(engine: Engine, peers: Arc<Peers>) -> Self {
-        Self {
-            local: engine.models().to_vec(),
-            engine: Arc::new(Mutex::new(engine)),
-            loaded: Arc::default(),
-            peers,
-        }
+        Self { local: engine.models().to_vec(), engine: Arc::new(Mutex::new(engine)), loaded: Arc::default(), peers }
     }
 
     /// Models on this machine only: what peers see of this node.
@@ -52,7 +26,12 @@ impl Models {
         let loaded = self.loaded.lock().unwrap().clone();
         self.local
             .iter()
-            .map(|m| ModelEntry { id: m.id.clone(), node: None, thinks: m.thinks, loaded: loaded.as_deref() == Some(m.id.as_str()) })
+            .map(|m| ModelEntry {
+                id: m.id.clone(),
+                node: None,
+                thinks: m.thinks,
+                loaded: loaded.as_deref() == Some(m.id.as_str()),
+            })
             .collect()
     }
 
@@ -90,15 +69,15 @@ impl Models {
             let _ = tokio::task::spawn_blocking(move || {
                 let res = engine.generate(&id, &msgs, params, |part| {
                     let event = match part {
-                        Part::Thinking(t) => Event::Thinking(t.to_owned()),
-                        Part::Answer(t) => Event::Answer(t.to_owned()),
+                        Part::Thinking(t) => Event::Thinking { text: t.to_owned() },
+                        Part::Answer(t) => Event::Answer { text: t.to_owned() },
                     };
                     tx.send(event).is_ok()
                 });
                 *loaded.lock().unwrap() = engine.loaded().map(str::to_owned);
                 let _ = tx.send(match res {
                     Ok(done) => Event::Done(done),
-                    Err(e) => Event::Failed(format!("{e:#}")),
+                    Err(e) => Event::Failed { message: format!("{e:#}") },
                 });
             })
             .await;

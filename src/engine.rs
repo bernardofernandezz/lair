@@ -20,7 +20,7 @@ const FORCED_CLOSE: &str = "\n\n</think>\n\n";
 /// Thinking tokens allowed in `Reasoning::Light` before the block is closed for the model.
 const LIGHT_BUDGET: usize = 512;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Msg {
     pub role: String,
     pub content: String,
@@ -32,7 +32,7 @@ pub fn with_system(msgs: &[Msg], extra: &str) -> Vec<Msg> {
     match out.iter_mut().find(|m| m.role == "system") {
         Some(sys) if sys.content.is_empty() => sys.content = extra.into(),
         Some(sys) => sys.content = format!("{}\n\n{extra}", sys.content),
-        None => out.insert(0, Msg { role: "system".into(), content: extra.into() }),
+        None => out.insert(0, Msg { role: "system".into(), content: extra.into(), ..Default::default() }),
     }
     out
 }
@@ -47,6 +47,21 @@ pub enum Reasoning {
     #[default]
     #[serde(rename = "high", alias = "medium")]
     Deep,
+}
+
+impl std::fmt::Display for Reasoning {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let v = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+        f.write_str(v.as_str().unwrap_or_default())
+    }
+}
+
+impl std::str::FromStr for Reasoning {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        serde_json::from_value(serde_json::Value::String(s.into())).map_err(|_| "expected none, low or high".into())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -67,12 +82,21 @@ pub enum Part<'a> {
     Answer(&'a str),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Done {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
-    /// "stop" (end-of-generation token or caller stopped) or "length" (hit max_tokens / context).
-    pub finish_reason: &'static str,
+    pub finish_reason: Finish,
+}
+
+/// Why a generation ended, in the chat API's words.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Finish {
+    /// The model ended its answer, or the caller stopped it.
+    Stop,
+    /// It hit `max_tokens` or the context size.
+    Length,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +105,28 @@ pub struct ModelInfo {
     pub path: PathBuf,
     /// Emits a `<think>` block before answering.
     pub thinks: bool,
+}
+
+/// One streamed piece of a generation. The stream always ends with `Done` or `Failed`. Peers send
+/// these to each other as server-sent events named after the variant.
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
+pub enum Event {
+    Thinking { text: String },
+    Answer { text: String },
+    Done(Done),
+    Failed { message: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelEntry {
+    /// `model` for local ones, `model@node` for a peer's.
+    pub id: String,
+    /// The peer it runs on; `None` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    pub thinks: bool,
+    pub loaded: bool,
 }
 
 /// The loaded model's one context, reused across generations instead of allocated for each.
@@ -124,7 +170,6 @@ impl Session<'_> {
             batch.add(*t, (start + k) as i32, &[0], k == last)?;
         }
         if let Err(e) = self.ctx.decode(batch) {
-            // The context's memory no longer matches `cached`; start clean next time.
             self.ctx.clear_kv_cache();
             self.cached.clear();
             return Err(e.into());
@@ -183,11 +228,7 @@ impl Engine {
     }
 
     fn load(&mut self, id: &str) -> Result<usize> {
-        let i = self
-            .catalog
-            .iter()
-            .position(|m| m.id == id)
-            .ok_or_else(|| anyhow!("unknown model {id}"))?;
+        let i = self.catalog.iter().position(|m| m.id == id).ok_or_else(|| anyhow!("unknown model {id}"))?;
         if self.loaded.as_ref().is_some_and(|(j, _)| *j == i) {
             return Ok(i);
         }
@@ -266,16 +307,16 @@ impl Engine {
             };
             let finish_reason = loop {
                 if produced >= p.max_tokens || session.cached.len() >= n_ctx {
-                    break "length";
+                    break Finish::Length;
                 }
                 let tok = sampler.sample(&session.ctx, batch.n_tokens() - 1);
                 if vocab.is_eog(tok) {
-                    break "stop";
+                    break Finish::Stop;
                 }
                 produced += 1;
                 split.push(&utf8.push(&vocab.token_to_piece(tok, false, None)), &mut emit);
                 if stopped.get() {
-                    break "stop";
+                    break Finish::Stop;
                 }
                 session.feed(&mut batch, &[tok])?;
                 if split.thinking() {
@@ -283,7 +324,7 @@ impl Engine {
                     if budget.is_some_and(|b| thought >= b) {
                         let close = vocab.tokenize(FORCED_CLOSE.as_bytes(), false, true);
                         if session.cached.len() + close.len() >= n_ctx {
-                            break "length";
+                            break Finish::Length;
                         }
                         session.feed(&mut batch, &close)?;
                         split.close(&mut emit);
@@ -520,7 +561,7 @@ mod tests {
         let mut engine = Engine::new(&[path], 99, 4096).unwrap();
         let id = engine.models()[0].id.clone();
         assert!(engine.models()[0].thinks, "test needs a model that thinks");
-        let msgs = [Msg { role: "user".into(), content: "What is 2+2?".into() }];
+        let msgs = [Msg { role: "user".into(), content: "What is 2+2?".into(), ..Default::default() }];
         let base = Params { temperature: 0.0, top_p: 1.0, max_tokens: 600, seed: None, reasoning: Reasoning::Off };
         let run = |engine: &mut Engine, p| {
             let (mut thought, mut answer) = (String::new(), String::new());
@@ -547,7 +588,7 @@ mod tests {
         assert!(done.completion_tokens <= LIGHT_BUDGET + 200);
 
         let (_, _, done) = run(&mut engine, Params { reasoning: Reasoning::Deep, max_tokens: 16, ..base });
-        assert_eq!((done.completion_tokens, done.finish_reason), (16, "length"));
+        assert_eq!((done.completion_tokens, done.finish_reason), (16, Finish::Length));
         assert_eq!(engine.loaded(), Some(id.as_str()));
     }
 }
