@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { parseScene } from "./scene/schema";
 import { splitMessage } from "./scene/split";
 
@@ -70,4 +71,14 @@ test("parseScene rejects oversized and malformed scenes", () => {
   expect(parseScene(`{"nodes":[{"geometry":{"kind":"nope"}}]}`).ok).toBe(false);
   expect(parseScene(`{"nodes":[{"geometry":{"kind":"box"}}]}`).ok).toBe(true);
   expect(parseScene("[]").ok).toBe(false);
+});
+
+test("the example in the 3D skill's prompt is a scene this schema accepts", () => {
+  const prompt = readFileSync(new URL("../../skills/3d/prompt.md", import.meta.url), "utf8");
+  const example = prompt.slice(prompt.indexOf("## Exemplo"));
+  const body = /```scene\n([\s\S]*?)```/.exec(example)?.[1];
+  expect(body).toBeDefined();
+  JSON.parse(body!); // the prompt promises strict JSON, not JSON5
+  const result = parseScene(body!);
+  expect(result.ok ? "" : result.error).toBe("");
 });
