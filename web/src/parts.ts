@@ -16,8 +16,11 @@ export type ToolStep = {
 /** An assistant reply, in the order things happened: text, a tool step, more text… */
 export type Part = { kind: "text"; text: string } | { kind: "tool"; step: ToolStep };
 
+/** An attachment shown on a user turn: `src` while the local file is at hand, `id` to fetch it later. */
+export type Attached = { name: string; image?: boolean; id?: string; src?: string };
+
 export type Turn =
-  | { role: "user"; content: string; refs?: Ref[] }
+  | { role: "user"; content: string; refs?: Ref[]; attachments?: Attached[] }
   | { role: "assistant"; parts: Part[]; reasoning?: string; thinkMs?: number; skill?: SkillInfo | null };
 
 export type AssistantTurn = Extract<Turn, { role: "assistant" }>;
@@ -60,7 +63,7 @@ export function fromStored(messages: StoredMessage[]): Turn[] {
   for (const m of messages) {
     if (m.role === "user") {
       reply = null;
-      out.push({ role: "user", content: m.content, refs: m.refs });
+      out.push({ role: "user", content: m.content, refs: m.refs, attachments: m.attachments.map((a) => ({ name: a.name, image: !!a.image, id: a.id })) });
       continue;
     }
     if (!reply) {

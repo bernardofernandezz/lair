@@ -31,6 +31,7 @@ impl Models {
                 node: None,
                 thinks: m.thinks,
                 loaded: loaded.as_deref() == Some(m.id.as_str()),
+                vision: m.mmproj.is_some(),
             })
             .collect()
     }
@@ -39,6 +40,11 @@ impl Models {
         let mut all = self.local();
         all.extend(self.peers.models());
         all
+    }
+
+    /// Runs here and sees images; remote models never get images, their paths would be ours.
+    pub fn sees_images(&self, id: &str) -> bool {
+        self.local.iter().any(|m| m.id == id && m.mmproj.is_some())
     }
 
     pub fn contains(&self, id: &str) -> bool {

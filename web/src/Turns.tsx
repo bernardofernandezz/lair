@@ -5,7 +5,7 @@ import { ToolCard } from "./agent/ToolCard";
 import { MAX_CANVASES, SceneCard } from "./scene/SceneCard";
 import { splitMessage, type Segment } from "./scene/split";
 import { convPath } from "./api";
-import { hasText, type AssistantTurn, type Turn } from "./parts";
+import { hasText, type AssistantTurn, type Attached, type Turn } from "./parts";
 
 type Props = {
   turns: Turn[];
@@ -14,10 +14,32 @@ type Props = {
   /** Name of the model being loaded for this reply, if it is not in memory yet. */
   loading: string | false;
   onDecide: (callId: string, allow: boolean, always: boolean) => void;
+  /** Fetches a stored attachment as a blob URL (the token can't ride on an `<img>`). */
+  fileUrl: (id: string) => Promise<string>;
   onOpen: (id: string) => void;
 };
 
-export function Turns({ turns, live, loading, onDecide, onOpen }: Props) {
+/** An attached image on a user turn: the local preview right after sending, the stored file later. */
+function Thumb({ a, fileUrl }: { a: Attached; fileUrl: Props["fileUrl"] }) {
+  const [src, setSrc] = useState(a.src ?? null);
+  useEffect(() => {
+    if (a.src || !a.id) return;
+    let url: string | null = null;
+    let live = true;
+    fileUrl(a.id).then((u) => (live ? setSrc((url = u)) : URL.revokeObjectURL(u)), () => {});
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [a.src, a.id, fileUrl]);
+  return (
+    <span className="thumb" title={a.name}>
+      {src ? <img src={src} alt={a.name} loading="lazy" /> : <span className="thumb-missing">{a.name}</span>}
+    </span>
+  );
+}
+
+export function Turns({ turns, live, loading, onDecide, fileUrl, onOpen }: Props) {
   const segments = useMemo(
     () => turns.map((t) => (t.role === "assistant" ? t.parts.map((p) => (p.kind === "text" ? splitMessage(p.text) : [])) : [])),
     [turns],
@@ -29,9 +51,16 @@ export function Turns({ turns, live, loading, onDecide, onOpen }: Props) {
         if (t.role === "user") {
           return (
             <li key={i} className="turn user">
-              {!!t.refs?.length && (
+              {t.attachments?.some((a) => a.image) && (
+                <span className="thumbs">
+                  {t.attachments.filter((a) => a.image).map((a, j) => (
+                    <Thumb key={`${j}-${a.name}`} a={a} fileUrl={fileUrl} />
+                  ))}
+                </span>
+              )}
+              {(!!t.refs?.length || t.attachments?.some((a) => !a.image)) && (
                 <span className="ref-chips">
-                  {t.refs.map((r) => (
+                  {t.refs?.map((r) => (
                     <a
                       key={r.id}
                       className="ref-chip"
@@ -44,6 +73,14 @@ export function Turns({ turns, live, loading, onDecide, onOpen }: Props) {
                     >
                       <span>{r.title}</span>
                     </a>
+                  ))}
+                  {t.attachments?.filter((a) => !a.image).map((a, j) => (
+                    <span key={`${j}-${a.name}`} className={`ref-chip is-file`} title="Documento anexado à mensagem">
+                      <svg viewBox="0 0 24 24" aria-hidden>
+                        <path d="M7 5h7l5 5v9a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM13 5v6h6" />
+                      </svg>
+                      <span>{a.name}</span>
+                    </span>
                   ))}
                 </span>
               )}

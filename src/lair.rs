@@ -24,7 +24,7 @@ pub struct Lair {
     /// Shared by everything that reaches the network: tools, skill downloads, peers.
     pub http: reqwest::Client,
     pub assets: Assets,
-    /// The folder the agent's tools work in.
+    /// The folder the agent's tools work in; attachments land there too.
     pub workspace: PathBuf,
     pub approvals: Approvals,
     /// Generation params from the command line; reasoning comes from [`Config`].

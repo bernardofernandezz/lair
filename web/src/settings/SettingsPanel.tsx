@@ -302,12 +302,19 @@ function System({ st }: { st: Settings }) {
             <div className="skill-main">
               <span className="skill-name">{m.id}</span>
               {m.thinks && <span className="badge">raciocina</span>}
+              {m.vision && <span className="badge">vê imagens</span>}
               {m.loaded && <span className="badge is-live">em memória</span>}
             </div>
           </li>
         ))}
       </ul>
       {st.system.models.length === 0 && <p className="hint">Nenhum modelo .gguf encontrado nesta máquina.</p>}
+      {!st.system.models.some((m) => m.vision) && (
+        <p className="hint">
+          Para anexar imagens, use um modelo de visão (Qwen2.5-VL, Gemma 3, SmolVLM…) e deixe o arquivo <code>mmproj-*.gguf</code> dele na
+          mesma pasta do modelo.
+        </p>
+      )}
       <p className="hint">
         Porta, contexto e GPU são escolhidos pelo comando que inicia o lair; veja <code>lair serve --help</code> para o restante.
       </p>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AuthError, client, convPath, type Api, type Conversation, type Effort, type ModelInfo } from "./api";
+import { AuthError, client, convPath, type Api, type Conversation, type Effort, type FileTypes, type ModelInfo } from "./api";
 import { Chat } from "./Chat";
 import { Sidebar } from "./conversations/Sidebar";
 import { SettingsPanel } from "./settings/SettingsPanel";
@@ -11,7 +11,7 @@ type Phase =
   | { kind: "connecting" }
   | { kind: "gate"; error?: string; attempt: number }
   | { kind: "offline" }
-  | { kind: "ready"; api: Api; models: ModelInfo[]; defaultEffort: Effort };
+  | { kind: "ready"; api: Api; models: ModelInfo[]; fileTypes: FileTypes; defaultEffort: Effort };
 
 const idFromPath = () => /^\/c\/([^/]+)/.exec(location.pathname)?.[1] ?? null;
 
@@ -23,10 +23,10 @@ export function App() {
   const connect = useCallback(async (token: string) => {
     const api = client(token);
     try {
-      const [models, settings] = await Promise.all([api.models(), api.settings()]);
+      const [models, fileTypes, settings] = await Promise.all([api.models(), api.fileTypes(), api.settings()]);
       save("token", token);
       await api.session().catch(() => {});
-      setPhase({ kind: "ready", api, models, defaultEffort: settings.system.reasoning });
+      setPhase({ kind: "ready", api, models, fileTypes, defaultEffort: settings.system.reasoning });
     } catch (e) {
       if (!(e instanceof AuthError)) return setPhase({ kind: "offline" });
       save("token", "");
@@ -65,7 +65,7 @@ export function App() {
         </div>
       )}
       {phase.kind === "ready" && (
-        <Workspace api={phase.api} models={phase.models} defaultEffort={phase.defaultEffort} signal={signal} onActive={setActive} onAuthLost={authLost} />
+        <Workspace api={phase.api} models={phase.models} fileTypes={phase.fileTypes} defaultEffort={phase.defaultEffort} signal={signal} onActive={setActive} onAuthLost={authLost} />
       )}
     </>
   );
@@ -74,6 +74,7 @@ export function App() {
 type WorkspaceProps = {
   api: Api;
   models: ModelInfo[];
+  fileTypes: FileTypes;
   defaultEffort: Effort;
   signal: React.RefObject<OrbSignal>;
   onActive: (active: boolean) => void;
@@ -81,7 +82,7 @@ type WorkspaceProps = {
 };
 
 /** The signed-in app: conversation list on the side, the open conversation in the middle. */
-function Workspace({ api, models, defaultEffort, signal, onActive, onAuthLost }: WorkspaceProps) {
+function Workspace({ api, models, fileTypes, defaultEffort, signal, onActive, onAuthLost }: WorkspaceProps) {
   const [current, setCurrent] = useState(idFromPath);
   // Remounts the chat on navigation only; creating a conversation mid-turn must not cut the stream.
   const [visit, setVisit] = useState(0);
@@ -134,6 +135,7 @@ function Workspace({ api, models, defaultEffort, signal, onActive, onAuthLost }:
         key={visit}
         api={api}
         models={models}
+        fileTypes={fileTypes}
         defaultEffort={defaultEffort}
         onOpen={go}
         conversationId={current}

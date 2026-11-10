@@ -13,6 +13,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::agent::{self, tools, CallSplit, Piece};
+use crate::attach::{self, Content};
 use crate::engine::{with_system, Event, Finish, Msg, Params, Reasoning};
 use crate::lair::Lair;
 use crate::store::{Message, Named, Ref, Settings, ToolStatus, ToolStep};
@@ -28,6 +29,16 @@ pub struct Input {
     pub model: Option<String>,
     pub effort: Option<Reasoning>,
     pub agent: Option<bool>,
+    /// Files uploaded for this question, by the id the upload answered and their display name.
+    #[serde(default)]
+    pub attachments: Vec<Attach>,
+}
+
+#[derive(Deserialize)]
+pub struct Attach {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 /// What the client sees, in order, as server-sent events named after the variant. `Done`, `Error`
@@ -62,7 +73,7 @@ pub async fn run(lair: Arc<Lair>, conv: String, input: Input, out: mpsc::Unbound
 struct Gone;
 
 async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedSender<Out>) -> Result<()> {
-    if input.content.trim().is_empty() {
+    if input.content.trim().is_empty() && input.attachments.is_empty() {
         bail!("message must not be empty");
     }
     let settings = Settings { model: input.model, effort: input.effort, agent: input.agent, ..Default::default() };
@@ -81,7 +92,29 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
             refs.push(Ref { id: c.id, title: c.title });
         }
     }
-    let question = Message { role: "user".into(), content: input.content.clone(), refs: refs.clone(), ..Default::default() };
+    // Attachments load before anything is saved, so a wrong id cannot half-write the question.
+    let loaded = input
+        .attachments
+        .iter()
+        .map(|a| attach::load(&lair.workspace, &a.id, &a.name))
+        .collect::<Result<Vec<_>>>()?;
+    let (mut docs, mut images) = (Vec::new(), Vec::new());
+    for l in &loaded {
+        match &l.content {
+            Content::Text(t) => docs.push((&l.attachment, t.as_str())),
+            Content::Image(path) => images.push(path.clone()),
+        }
+    }
+    if !images.is_empty() && !lair.models.sees_images(&model) {
+        bail!("o modelo {model} não enxerga imagens; escolha um modelo de visão local (com o mmproj ao lado do .gguf)");
+    }
+    let question = Message {
+        role: "user".into(),
+        content: input.content.clone(),
+        refs: refs.clone(),
+        attachments: loaded.iter().map(|l| l.attachment.clone()).collect(),
+        ..Default::default()
+    };
     lair.store.append(conv, &question)?;
 
     let mut history = to_prompt(&lair.store.messages(conv)?);
@@ -89,6 +122,11 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     if !refs.is_empty() {
         last.content = format!("{}{}", reference_context(lair, &refs)?, input.content);
     }
+    if !docs.is_empty() {
+        last.content = format!("{}{}", attach::sections(&docs), last.content);
+    }
+    // shortcut: only the current question carries its images; earlier ones stay out to fit the context.
+    last.images = images;
     trim(&mut history, lair.history_chars);
     let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history, lair.assets.ids());
     if c.agent {

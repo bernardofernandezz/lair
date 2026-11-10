@@ -1,5 +1,6 @@
 mod agent;
 mod assets;
+mod attach;
 mod chat;
 mod config;
 mod engine;

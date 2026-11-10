@@ -26,7 +26,7 @@ import type { StoredMessage } from "./api";
 
 test("fromStored groups the assistant and tool messages after a question into one reply", () => {
   const m = (role: StoredMessage["role"], content: string, extra: Partial<StoredMessage> = {}): StoredMessage => ({
-    id: 0, role, content, reasoning: null, skill: null, tool: null, refs: [], created: 0, ...extra,
+    id: 0, role, content, reasoning: null, skill: null, tool: null, refs: [], attachments: [], created: 0, ...extra,
   });
   const turns = fromStored([
     m("user", "liste"),

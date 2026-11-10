@@ -5,11 +5,12 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["multipart"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 html2text = "0.17.4"
-llama-cpp-2 = "0.1.161"
+llama-cpp-2 = { version = "0.1.161", features = ["mtmd"] }
 mime_guess = "2.0.5"
+pdf-extract = "0.12.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rust-embed = { version = "8.13.0", features = ["mime-guess"] }

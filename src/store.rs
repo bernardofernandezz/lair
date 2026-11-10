@@ -40,6 +40,7 @@ pub struct Message {
     pub skill: Option<Named>,
     pub tool: Option<ToolStep>,
     pub refs: Vec<Ref>,
+    pub attachments: Vec<Attachment>,
     pub created: i64,
 }
 
@@ -74,6 +75,23 @@ pub enum ToolStatus {
     Denied,
 }
 
+/// A file attached to a user message: its upload id, the name to show, and how much text it gave.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Rows from before ids stored the workspace path (`anexos/<id>`).
+    #[serde(alias = "path", deserialize_with = "file_name")]
+    pub id: String,
+    pub name: String,
+    pub chars: usize,
+    #[serde(default)]
+    pub image: bool,
+}
+
+fn file_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(s.rsplit('/').next().unwrap_or_default().to_owned())
+}
+
 #[derive(Default, Deserialize)]
 pub struct Settings {
     pub title: Option<String>,
@@ -106,6 +124,18 @@ fn tick(db: &Connection) -> rusqlite::Result<i64> {
 /// The `config` row holding the settings the UI saved, as one JSON document.
 const CONFIG_KEY: &str = "runtime";
 
+/// Conversations made before attachments existed have no `attachments` column in `messages`.
+fn migrate(db: &Connection) {
+    let has = db
+        .query_row("SELECT count(*) FROM pragma_table_info('messages') WHERE name = 'attachments'", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap_or(1);
+    if has == 0 {
+        db.execute_batch("ALTER TABLE messages ADD COLUMN attachments TEXT").expect("adding the attachments column");
+    }
+}
+
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -128,6 +158,7 @@ CREATE TABLE IF NOT EXISTS messages (
     skill TEXT,
     tool TEXT,
     refs TEXT,
+    attachments TEXT,
     created INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS config (
@@ -148,6 +179,7 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         db.execute_batch(SCHEMA)?;
+        migrate(&db);
         Ok(Self { db: Mutex::new(db) })
     }
 
@@ -155,6 +187,7 @@ impl Store {
     fn memory() -> Self {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        migrate(&db);
         Self { db: Mutex::new(db) }
     }
 
@@ -238,10 +271,11 @@ impl Store {
         let skill = m.skill.as_ref().map(serde_json::to_string).transpose()?;
         let tool = m.tool.as_ref().map(serde_json::to_string).transpose()?;
         let refs = (!m.refs.is_empty()).then(|| serde_json::to_string(&m.refs)).transpose()?;
+        let attachments = (!m.attachments.is_empty()).then(|| serde_json::to_string(&m.attachments)).transpose()?;
         db.execute(
-            "INSERT INTO messages (conv, role, content, reasoning, skill, tool, refs, created)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![conv, m.role, m.content, m.reasoning, skill, tool, refs, t],
+            "INSERT INTO messages (conv, role, content, reasoning, skill, tool, refs, attachments, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![conv, m.role, m.content, m.reasoning, skill, tool, refs, attachments, t],
         )?;
         let id = db.last_insert_rowid();
         let title = if m.role == "user" { title_from(&m.content) } else { String::new() };
@@ -315,6 +349,7 @@ fn message(r: &Row) -> rusqlite::Result<Message> {
         skill: json(r, "skill")?,
         tool: json(r, "tool")?,
         refs: json(r, "refs")?.unwrap_or_default(),
+        attachments: json(r, "attachments")?.unwrap_or_default(),
         created: r.get("created")?,
     })
 }
@@ -393,10 +428,35 @@ mod tests {
     }
 
     #[test]
-    fn config_round_trips() {
+    fn config_round_trips_and_attachments_replay() {
         let s = Store::memory();
         assert_eq!(s.config().unwrap(), serde_json::json!({}));
         s.save_config(&serde_json::json!({ "peers": ["doom:8080"] })).unwrap();
         assert_eq!(s.config().unwrap()["peers"][0], "doom:8080");
+
+        let c = s.create(Settings::default()).unwrap();
+        s.append(
+            &c.id,
+            &Message {
+                role: "user".into(),
+                content: "o que diz este pdf?".into(),
+                attachments: vec![Attachment {
+                    id: "1a-contrato.pdf".into(),
+                    name: "contrato.pdf".into(),
+                    chars: 400,
+                    image: false,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stored = s.messages(&c.id).unwrap();
+        assert_eq!(stored[0].attachments[0].id, "1a-contrato.pdf");
+        assert_eq!(stored[0].attachments.len(), 1);
+        s.append(&c.id, &user("sem anexo")).unwrap();
+        assert!(s.messages(&c.id).unwrap()[1].attachments.is_empty());
+
+        let old: Attachment = serde_json::from_str(r#"{"name":"a.pdf","path":"anexos/1a-a.pdf","chars":3}"#).unwrap();
+        assert_eq!((old.id.as_str(), old.image), ("1a-a.pdf", false), "rows saved with a path still open");
     }
 }

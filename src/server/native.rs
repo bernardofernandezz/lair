@@ -1,16 +1,16 @@
-//! lair's own API, under `/lair/v1`: conversations and their turns, skills, and what other nodes
-//! ask of this one.
+//! lair's own API, under `/lair/v1`: conversations and their turns, skills, attachments, and what
+//! other nodes ask of this one.
 
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::http::{header, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -18,6 +18,7 @@ use tokio_stream::StreamExt;
 
 use super::{bad, missing, settings, sse, ApiResult, AppState};
 use crate::agent::Decision;
+use crate::attach;
 use crate::engine::{Msg, Params};
 use crate::peers::NodeInfo;
 use crate::skills::{install, slug, Manifest, Skill};
@@ -39,6 +40,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/skills/index", get(skills_index))
         .route("/skills/install", post(install_skill))
         .route("/skills/{id}", put(save_skill).patch(toggle_skill).delete(remove_skill))
+        .route("/files", get(file_types).post(upload_file))
+        .route("/files/{id}", get(file))
+        .layer(DefaultBodyLimit::max(attach::MAX_UPLOAD + 64 * 1024))
         .merge(settings::routes())
 }
 
@@ -137,6 +141,48 @@ struct InstallRequest {
 async fn install_skill(State(s): S, Json(r): Json<InstallRequest>) -> ApiResult<Json<Skill>> {
     let f = install::fetch(&s.lair.http, &r.url).await.map_err(bad)?;
     Ok(Json(s.lair.skills.write().unwrap().save(&f.id, &f.manifest, &f.prompt).map_err(bad)?))
+}
+
+async fn file_types() -> Json<&'static attach::Types> {
+    Json(&attach::TYPES)
+}
+
+#[derive(Serialize)]
+struct Uploaded {
+    /// What a turn sends back to attach this file.
+    id: String,
+    name: String,
+}
+
+async fn upload_file(State(s): S, form: Multipart) -> ApiResult<Json<Uploaded>> {
+    let (name, data) = read_file(form).await?;
+    let id = attach::save(&s.lair.workspace, &name, &data).map_err(bad)?;
+    Ok(Json(Uploaded { id, name }))
+}
+
+/// An uploaded attachment, for the chat's thumbnails.
+async fn file(State(s): S, Path(id): Path<String>) -> ApiResult<Response> {
+    let path = attach::path(&s.lair.workspace, &id).map_err(missing)?;
+    let data = tokio::fs::read(&path).await.map_err(missing)?;
+    let mime = mime_guess::from_path(&path).first_or_octet_stream();
+    // Uploads are user content: never let one run as a page on this origin.
+    let headers = [
+        (header::CONTENT_TYPE, mime.essence_str().to_owned()),
+        (header::CONTENT_SECURITY_POLICY, "default-src 'none'; sandbox".to_owned()),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+    ];
+    Ok((headers, data).into_response())
+}
+
+/// The form's `file` field, whole, with the name the browser gave it.
+async fn read_file(mut form: Multipart) -> ApiResult<(String, Vec<u8>)> {
+    while let Some(field) = form.next_field().await.map_err(bad)? {
+        if field.name() == Some("file") {
+            let name = field.file_name().unwrap_or("arquivo").to_owned();
+            return Ok((name, field.bytes().await.map_err(bad)?.to_vec()));
+        }
+    }
+    Err(bad(anyhow::anyhow!("o formulário não tem o campo \"file\"")))
 }
 
 /// The configured skills index, marking which entries are already installed.

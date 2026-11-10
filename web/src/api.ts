@@ -1,5 +1,5 @@
 /** `node` is the peer machine the model runs on; absent for this one. */
-export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean };
+export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean };
 
 /** A model's own name: a peer's models are listed as `name@node`. */
 export const modelName = (m: ModelInfo) => (m.node ? m.id.slice(0, -(m.node.length + 1)) : m.id);
@@ -27,6 +27,12 @@ export type ToolStatus = "ok" | "error" | "denied";
 export type ToolCall = { id: string; name: string; label?: string; subject?: string; arguments: Record<string, unknown>; needs_approval: boolean };
 export type ToolResult = { id: string; status: ToolStatus; output: string };
 
+/** A file attached to a user message, as it is stored with it. */
+export type AttachmentInfo = { id: string; name: string; chars: number; image?: boolean };
+/** The file extensions the server accepts, by what it does with them. */
+export type FileTypes = { documents: string[]; images: string[] };
+/** An upload the server accepted: the workspace id goes back in the turn, the name is for display. */
+export type UploadedFile = { id: string; name: string };
 
 export type StoredMessage = {
   id: number;
@@ -37,6 +43,7 @@ export type StoredMessage = {
   /** An agent step; its output is the message's `content`. */
   tool: (Omit<ToolCall, "needs_approval"> & { status: ToolStatus; raw: string }) | null;
   refs: Ref[];
+  attachments: AttachmentInfo[];
   created: number;
 };
 
@@ -113,6 +120,13 @@ async function check(r: Response): Promise<Response> {
 
 type Frame = { event: string; data: string };
 
+/** Wraps one file in the field name every upload endpoint reads. */
+function one(field: string, file: File): FormData {
+  const form = new FormData();
+  form.append(field, file);
+  return form;
+}
+
 /** Splits complete SSE frames off the front of `buf`; returns them and the unfinished rest. */
 export function takeFrames(buf: string): [Frame[], string] {
   const parts = buf.split("\n\n");
@@ -141,6 +155,8 @@ export function client(token: string) {
     return r.status === 204 ? (undefined as T) : r.json();
   };
   const conv = (id: string) => `/lair/v1/conversations/${encodeURIComponent(id)}`;
+  /** Multipart calls set their own content-type; only the token rides along. */
+  const upload = async <T>(path: string, form: FormData): Promise<T> => (await check(await fetch(path, { method: "POST", headers, body: form }))).json();
 
   return {
     /** Throws AuthError when the token is missing or wrong. */
@@ -173,11 +189,16 @@ export function client(token: string) {
     settings: () => get<Settings>("/lair/v1/settings"),
     /** Changes the named settings; `""` clears one, the others stay. */
     saveSettings: (change: Config) => send<void>("PATCH", "/lair/v1/settings", change),
+    fileTypes: () => get<FileTypes>("/lair/v1/files"),
+    /** Saves a file into the agent's workspace; the answer's `id` goes into the turn. */
+    uploadFile: (file: File) => upload<UploadedFile>("/lair/v1/files", one("file", file)),
+    /** An attachment as a blob URL: `<img>` can't send the token, so it is fetched here. Revoke when done. */
+    fileUrl: async (id: string) => URL.createObjectURL(await (await check(await fetch(`/lair/v1/files/${encodeURIComponent(id)}`, { headers }))).blob()),
 
     /** Streams one turn. Aborting `signal` disconnects; the server stops and keeps what was generated. */
     async turn(
       id: string,
-      input: { content: string; refs: string[]; model: string; effort?: Effort; agent: boolean },
+      input: { content: string; refs: string[]; model: string; effort?: Effort; agent: boolean; attachments: UploadedFile[] },
       signal: AbortSignal,
       on: (e: TurnEvent) => void,
     ): Promise<void> {

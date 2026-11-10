@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AuthError, ConnectionLost, type Api, type Conversation, type Effort, type ModelInfo, type Ref } from "./api";
-import { Composer } from "./Composer";
+import { AuthError, ConnectionLost, type Api, type Conversation, type Effort, type FileTypes, type ModelInfo, type Ref, type UploadedFile } from "./api";
+import { Composer, type Pending } from "./Composer";
 import { isEffort, ModelPicker, ReasoningControl } from "./Controls";
 import type { OrbSignal } from "./Orb";
 import { load, save } from "./storage";
@@ -10,6 +10,7 @@ import { addCall, addText, emptyReply, fromStored, setResult, snapshot, type Tur
 type Props = {
   api: Api;
   models: ModelInfo[];
+  fileTypes: FileTypes;
   /** The server's reasoning level, used until the user picks one for this conversation. */
   defaultEffort: Effort;
   /** Opens another conversation in place. */
@@ -25,7 +26,7 @@ type Props = {
   onAuthLost: () => void;
 };
 
-export function Chat({ api, models: initialModels, defaultEffort, onOpen, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost }: Props) {
+export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onOpen, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost }: Props) {
   const [models, setModels] = useState(initialModels);
   const [model, setModel] = useState(() => {
     const saved = load("model");
@@ -73,14 +74,14 @@ export function Chat({ api, models: initialModels, defaultEffort, onOpen, conver
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
   }, [turns]);
 
-  async function send(text: string, refs: Ref[]) {
+  async function send(text: string, refs: Ref[], files: Pending[]) {
     if (busy) return;
     const ctl = new AbortController();
     abort.current = ctl;
     pinned.current = true;
     setError(null);
     setBusy(true);
-    const before: Turn[] = [...turns, { role: "user", content: text, refs }];
+    const before: Turn[] = [...turns, { role: "user", content: text, refs, attachments: files.map(({ file, image }) => ({ name: file.name, image, src: image ? URL.createObjectURL(file) : undefined })) }];
     const reply = emptyReply();
     const show = () => setTurns([...before, snapshot(reply)]);
     show();
@@ -90,8 +91,10 @@ export function Chat({ api, models: initialModels, defaultEffort, onOpen, conver
         conv.current = (await api.create({ model, effort, agent })).id;
         onCreated(conv.current);
       }
+      const attachments: UploadedFile[] = [];
+      for (const { file } of files) attachments.push(await api.uploadFile(file));
       const sig = signal.current;
-      await api.turn(conv.current, { content: text, refs: refs.map((r) => r.id), model, effort: effort ?? undefined, agent }, ctl.signal, (e) => {
+      await api.turn(conv.current, { content: text, refs: refs.map((r) => r.id), model, effort: effort ?? undefined, agent, attachments }, ctl.signal, (e) => {
         switch (e.event) {
           case "skill":
             reply.skill = e.data;
@@ -172,6 +175,7 @@ export function Chat({ api, models: initialModels, defaultEffort, onOpen, conver
           turns={turns}
           live={busy}
           loading={!current.loaded && current.id}
+          fileUrl={api.fileUrl}
           onDecide={(id, allow, always) => api.approve(id, { allow, always }).catch((e) => setError((e as Error).message))}
           onOpen={onOpen}
         />
@@ -189,6 +193,8 @@ export function Chat({ api, models: initialModels, defaultEffort, onOpen, conver
         busy={busy}
         hello={!active && "Escolha um modelo e pergunte qualquer coisa. Tudo roda nesta máquina."}
         onSend={send}
+        vision={!!current.vision}
+        fileTypes={fileTypes}
         onStop={() => abort.current?.abort()}
         tools={
           <>

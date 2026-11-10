@@ -378,6 +378,11 @@ code {
 }
 
 .tools .send {
+  margin-left: 0;
+}
+
+/* The paperclip groups with the send button, away from the control switches. */
+.attach {
   margin-left: auto;
 }
 
@@ -1603,6 +1608,53 @@ a.ref-chip {
   border-color: transparent;
 }
 
+/* Anexos: the paperclip button and document chips inherit the ref-chip shape */
+
+.attach {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--slate);
+  transition: color 0.2s, background 0.2s;
+}
+
+.attach:hover {
+  background: var(--line);
+  color: var(--ink);
+}
+
+.attach svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ref-chip.is-file svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ref-chip.is-file em {
+  font-style: normal;
+  color: var(--slate);
+  font-size: 12px;
+}
+
 /* The Pearl in CSS: the mark, the settings header and the no-WebGL fallback share the shader's
    obsidian body and thin-film rim, so the identity holds wherever the 3D sphere can't be. */
 
@@ -1675,6 +1727,72 @@ a.ref-chip {
 .panel :focus-visible,
 .composer :focus-visible {
   outline-color: color-mix(in oklab, var(--violet) 70%, var(--ink));
+}
+
+/* Images on a turn and in the composer */
+
+.thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.thumb {
+  display: grid;
+  place-items: center;
+  width: 148px;
+  height: 148px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--haze);
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb-missing {
+  padding: 8px;
+  color: var(--slate);
+  font-size: 12px;
+  text-align: center;
+  word-break: break-all;
+}
+
+.ref-chip.is-image {
+  padding-left: 3px;
+}
+
+.ref-chip.is-image img {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  object-fit: cover;
+}
+
+.composer.is-dropping {
+  border-color: color-mix(in oklab, var(--teal) 70%, transparent);
+}
+
+.drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border: 2px dashed color-mix(in oklab, var(--teal) 70%, transparent);
+  border-radius: inherit;
+  background: color-mix(in oklab, var(--mist) 86%, transparent);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 550;
+  pointer-events: none;
 }
 
 /* Tailnet status */
@@ -1789,6 +1907,10 @@ a.ref-chip {
   .tabs button {
     flex: none;
   }
+  .thumb {
+    width: 112px;
+    height: 112px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -1809,7 +1931,7 @@ a.ref-chip {
     order: 3;
   }
   .tools .picker {
-    /* Base 0: the model name gives way so the agent switch and send keep one row. */
+    /* Base 0: the model name gives way so agent, attach and send keep one row. */
     flex: 1 1 0;
     min-width: 0;
   }

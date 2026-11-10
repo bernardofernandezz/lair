@@ -9,6 +9,7 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
+use llama_cpp_2::mtmd::{mtmd_default_marker, MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,10 @@ const LIGHT_BUDGET: usize = 512;
 pub struct Msg {
     pub role: String,
     pub content: String,
+    /// Image files shown to a vision model with this message. Local paths only: never read from or
+    /// sent over the wire, so no API client or peer can point the engine at a file.
+    #[serde(skip)]
+    pub images: Vec<PathBuf>,
 }
 
 /// Appends `extra` to the first system message, or adds one at the start.
@@ -105,6 +110,8 @@ pub struct ModelInfo {
     pub path: PathBuf,
     /// Emits a `<think>` block before answering.
     pub thinks: bool,
+    /// The multimodal projector found next to the model; with it the model sees images.
+    pub mmproj: Option<PathBuf>,
 }
 
 /// One streamed piece of a generation. The stream always ends with `Done` or `Failed`. Peers send
@@ -127,6 +134,9 @@ pub struct ModelEntry {
     pub node: Option<String>,
     pub thinks: bool,
     pub loaded: bool,
+    /// Sees images (a projector was found next to it). Peers on older versions don't send it.
+    #[serde(default)]
+    pub vision: bool,
 }
 
 /// The loaded model's one context, reused across generations instead of allocated for each.
@@ -134,7 +144,12 @@ struct Session<'m> {
     ctx: LlamaContext<'m>,
     /// Tokens whose state is in the context's memory, in order; the next prompt reuses the common prefix.
     cached: Vec<LlamaToken>,
+    /// Image encoder of a vision model.
+    mtmd: Option<MtmdContext>,
 }
+
+/// Stands in for image positions in `cached`; never matches a real token, so the next prompt starts over.
+const NOT_A_TOKEN: LlamaToken = LlamaToken(-1);
 
 self_cell::self_cell!(
     /// A model in memory together with the context that borrows it.
@@ -201,6 +216,7 @@ impl Engine {
             collect_gguf(p, &mut files).with_context(|| format!("reading {}", p.display()))?;
         }
         files.sort();
+        let (projectors, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| is_mmproj(p));
         let mut catalog: Vec<ModelInfo> = Vec::new();
         for path in files {
             let id = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
@@ -209,12 +225,16 @@ impl Engine {
                 continue;
             }
             match probe(&backend, &path) {
-                Ok(thinks) => catalog.push(ModelInfo { id, path, thinks }),
+                Ok(thinks) => catalog.push(ModelInfo { id, path, thinks, mmproj: None }),
                 Err(e) => eprintln!("skipping {}: {e:#}", path.display()),
             }
         }
         if catalog.is_empty() {
             bail!("no usable .gguf chat models in {paths:?}");
+        }
+        let all: Vec<PathBuf> = catalog.iter().map(|m| m.path.clone()).collect();
+        for m in &mut catalog {
+            m.mmproj = projector_for(&m.path, &all, &projectors);
         }
         Ok(Self { backend, gpu_layers, n_ctx, catalog, loaded: None })
     }
@@ -237,10 +257,20 @@ impl Engine {
         let params = LlamaModelParams::default().with_n_gpu_layers(self.gpu_layers);
         let model = LlamaModel::load_from_file(&self.backend, path, &params)
             .with_context(|| format!("loading model {}", path.display()))?;
-        let (backend, n_ctx) = (&self.backend, self.n_ctx);
+        let (backend, n_ctx, mmproj) = (&self.backend, self.n_ctx, self.catalog[i].mmproj.clone());
         let loaded = Loaded::try_new(model, |m| -> Result<Session> {
             let params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx)).with_n_batch(n_ctx);
-            Ok(Session { ctx: m.new_context(backend, params)?, cached: Vec::new() })
+            let mtmd = match mmproj {
+                Some(p) => {
+                    let params = MtmdContextParams { use_gpu: self.gpu_layers > 0, ..Default::default() };
+                    Some(
+                        MtmdContext::init_from_file(&p.to_string_lossy(), m, &params)
+                            .with_context(|| format!("loading vision projector {}", p.display()))?,
+                    )
+                }
+                None => None,
+            };
+            Ok(Session { ctx: m.new_context(backend, params)?, cached: Vec::new(), mtmd })
         })?;
         self.loaded = Some((i, loaded));
         Ok(i)
@@ -255,12 +285,13 @@ impl Engine {
         p: Params,
         mut on_part: impl for<'a> FnMut(Part<'a>) -> bool,
     ) -> Result<Done> {
+        let images: Vec<&PathBuf> = msgs.iter().flat_map(|m| &m.images).collect();
         let i = self.load(model_id)?;
         let thinks = self.catalog[i].thinks;
         let n_ctx = self.n_ctx as usize;
         let loaded = &mut self.loaded.as_mut().expect("load() just set it").1;
         loaded.with_dependent_mut(|model, session| {
-            let mut prompt = render_prompt(model, msgs)?;
+            let mut prompt = render_prompt(model, msgs, !images.is_empty())?;
             // Some templates open the block themselves, so the output starts mid-thought.
             let opened = thinks && prompt.trim_end().ends_with(OPEN);
             if thinks && p.reasoning == Reasoning::Off {
@@ -276,15 +307,37 @@ impl Engine {
             // Templates usually emit BOS themselves; avoid a double BOS.
             let bos = vocab.text(vocab.bos()).and_then(|s| s.to_str().ok()).unwrap_or("");
             let add_bos = bos.is_empty() || !prompt.starts_with(bos);
-            let tokens = vocab.tokenize(prompt.as_bytes(), add_bos, true);
-
-            if tokens.is_empty() || tokens.len() >= n_ctx {
-                bail!("prompt is {} tokens, context is {n_ctx}", tokens.len());
-            }
-
             let mut batch = LlamaBatch::new(n_ctx, 1);
-            let reused = session.reuse(&tokens);
-            session.feed(&mut batch, &tokens[reused..])?;
+            let prompt_tokens = if images.is_empty() {
+                let tokens = vocab.tokenize(prompt.as_bytes(), add_bos, true);
+                if tokens.is_empty() || tokens.len() >= n_ctx {
+                    bail!("prompt is {} tokens, context is {n_ctx}", tokens.len());
+                }
+                let reused = session.reuse(&tokens);
+                session.feed(&mut batch, &tokens[reused..])?;
+                tokens.len()
+            } else {
+                // shortcut: a prompt with images starts from an empty context instead of reusing a prefix; cache it if it gets slow.
+                let mtmd = session.mtmd.as_mut().context("this model has no vision projector")?;
+                let bitmaps = images
+                    .iter()
+                    .map(|p| {
+                        MtmdBitmap::from_file(mtmd, &p.to_string_lossy(), false)
+                            .with_context(|| format!("reading image {}", p.display()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let text = MtmdInputText { text: prompt.clone(), add_special: add_bos, parse_special: true };
+                let chunks = mtmd.tokenize(text, &bitmaps.iter().collect::<Vec<_>>())?;
+                if chunks.total_tokens() >= n_ctx {
+                    bail!("prompt is {} tokens with the images, context is {n_ctx}", chunks.total_tokens());
+                }
+                session.ctx.clear_kv_cache();
+                session.cached.clear();
+                let n_past = chunks.eval_chunks(mtmd, &mut session.ctx, 0, 0, n_ctx as i32, true)?;
+                // Positions, not tokens, decide where the answer goes; `feed` counts them from `cached`.
+                session.cached = vec![NOT_A_TOKEN; n_past as usize];
+                chunks.total_tokens()
+            };
 
             let mut sampler = if p.temperature <= 0.0 {
                 LlamaSampler::greedy()
@@ -332,7 +385,7 @@ impl Engine {
                 }
             };
             split.finish(&mut emit);
-            Ok(Done { prompt_tokens: tokens.len(), completion_tokens: produced, finish_reason })
+            Ok(Done { prompt_tokens, completion_tokens: produced, finish_reason })
         })
     }
 }
@@ -358,11 +411,39 @@ fn probe(backend: &LlamaBackend, path: &Path) -> Result<bool> {
     Ok(in_template || special_token)
 }
 
-fn render_prompt(model: &LlamaModel, msgs: &[Msg]) -> Result<String> {
+/// Projector files ship next to the weights as `mmproj-*.gguf` (or `*-mmproj-*.gguf`).
+fn is_mmproj(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj"))
+}
+
+/// The projector for `model`: in its folder, named after it, or the only one there beside a lone model.
+fn projector_for(model: &Path, models: &[PathBuf], projectors: &[PathBuf]) -> Option<PathBuf> {
+    let dir = model.parent();
+    let here: Vec<&PathBuf> = projectors.iter().filter(|p| p.parent() == dir).collect();
+    let stem = model.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    // `Qwen2.5-VL-3B-Q4_K_M` → `qwen2.5-vl-3b`: projectors don't carry the weights' quantization.
+    let base = stem.rsplit_once(['-', '.']).map_or(stem.as_str(), |(b, q)| {
+        if q.starts_with('q') || q.starts_with("f16") || q.starts_with("bf16") {
+            b
+        } else {
+            stem.as_str()
+        }
+    });
+    let named =
+        here.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains(base)));
+    let alone = models.iter().filter(|m| m.parent() == dir).count() == 1 && here.len() == 1;
+    named.or(alone.then(|| &here[0])).map(|p| (*p).clone())
+}
+
+fn render_prompt(model: &LlamaModel, msgs: &[Msg], vision: bool) -> Result<String> {
     let tmpl = model.chat_template(None).context("model has no built-in chat template")?;
     let chat = msgs
         .iter()
-        .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
+        .map(|m| {
+            // The image encoder replaces each marker with that image's embedding, in order.
+            let marks = if vision { mtmd_default_marker().repeat(m.images.len()) } else { String::new() };
+            LlamaChatMessage::new(m.role.clone(), format!("{marks}{}", m.content))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(model.apply_chat_template(&tmpl, &chat, true)?)
 }
@@ -552,6 +633,21 @@ mod tests {
         assert_eq!(b.push(&[b'a', e[0]]), "a");
         assert_eq!(b.push(&[e[1]]), "é");
         assert_eq!(b.push(&[0xff]), "\u{fffd}");
+    }
+
+    #[test]
+    fn projector_pairs_by_name_or_lone_folder() {
+        let p = |s: &str| PathBuf::from(s);
+        let models = [p("/m/Qwen2.5-VL-3B-Q4_K_M.gguf"), p("/m/Qwen3-4B-Q4_K_M.gguf"), p("/v/gemma.gguf")];
+        let projs = [p("/m/mmproj-Qwen2.5-VL-3B-f16.gguf"), p("/v/mmproj-model-f16.gguf")];
+        assert_eq!(projector_for(&models[0], &models, &projs), Some(projs[0].clone()));
+        assert_eq!(projector_for(&models[1], &models, &projs), None, "a text model in a shared folder stays text-only");
+        assert_eq!(
+            projector_for(&models[2], &models, &projs),
+            Some(projs[1].clone()),
+            "lone model takes the lone projector"
+        );
+        assert!(is_mmproj(&projs[0]) && !is_mmproj(&models[0]));
     }
 
     #[test]
