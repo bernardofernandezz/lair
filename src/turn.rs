@@ -349,7 +349,7 @@ impl Step<'_> {
     }
 }
 
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
     format!("{:016x}", RandomState::new().hash_one(SystemTime::now()))
 }
 

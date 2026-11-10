@@ -1120,6 +1120,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "clap",
  "html2text",
  "llama-cpp-2",

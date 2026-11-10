@@ -151,19 +151,21 @@ pub fn spec(name: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|s| s.name == name)
 }
 
+/// How a model calls a tool; shared by agent mode and the chat API's `tools`.
+pub const PROTOCOL: &str = "# Tools\n\
+     You can act by using tools. To use one, write exactly\n\
+     <tool_call>{\"name\": \"NAME\", \"arguments\": {...}}</tool_call>\n\
+     and stop. The result arrives in a <tool_response> message. Use one tool at a time, \
+     only when needed. If you say you will do something, make the call right away, in the same \
+     reply; don't end the reply just announcing it. With the result in hand, answer the user \
+     normally, without <tool_call>, in the user's language.\n";
+
 /// The instructions that turn a chat model into an agent.
 pub fn system_prompt() -> String {
-    let mut out = String::from(
-        "# Tools\n\
-         You can act by using tools. To use one, write exactly\n\
-         <tool_call>{\"name\": \"NAME\", \"arguments\": {...}}</tool_call>\n\
-         and stop. The result arrives in a <tool_response> message. Use one tool at a time, \
-         only when needed. If you say you will do something, make the call right away, in the same \
-         reply; don't end the reply just announcing it. With the result in hand, answer the user \
-         normally, without <tool_call>, in the user's language.\n\
-         Paths are relative to the working folder (workspace).\n\
+    let mut out = format!(
+        "{PROTOCOL}Paths are relative to the working folder (workspace).\n\
          When you use information from a web search, cite the source with its number in brackets right \
-         after the passage, like this: [1]. Only cite numbers the search returned.\n\nTools:\n",
+         after the passage, like this: [1]. Only cite numbers the search returned.\n\nTools:\n"
     );
     for s in SPECS {
         out.push_str(&format!("- {}: {}\n", s.name, s.usage));
