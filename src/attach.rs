@@ -90,7 +90,7 @@ pub fn load(workspace: &Path, id: &str, name: &str) -> Result<Loaded> {
         Content::Image(file)
     } else if ext(id) == "pdf" {
         let data = std::fs::read(&file)?;
-        Content::Text(pdf_extract::extract_text_from_mem(&data).context("extraindo texto do pdf")?)
+        Content::Text(pdf_extract::extract_text_from_mem(&data).context("extracting text from the pdf")?)
     } else {
         Content::Text(std::fs::read_to_string(&file).with_context(|| format!("{name} is not a text file"))?)
     };
