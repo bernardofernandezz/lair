@@ -42,3 +42,57 @@ test("fromStored groups the assistant and tool messages after a question into on
   expect(reply.parts.map((p) => p.kind)).toEqual(["text", "tool", "text"]);
   expect(reply.parts[1]).toMatchObject({ kind: "tool", step: { name: "list_dir", status: "ok", output: "a.md" } });
 });
+
+import { groupByNode, quantOf } from "./Controls";
+
+test("quantOf reads the quantization from GGUF file names", () => {
+  expect(quantOf("Qwen3-4B-Q4_K_M")).toBe("Q4_K_M");
+  expect(quantOf("gemma-3-4b-it-q8_0")).toBe("Q8_0");
+  expect(quantOf("Llama-3.2-3B-Instruct-IQ4_XS")).toBe("IQ4_XS");
+  expect(quantOf("model-BF16")).toBe("BF16");
+  expect(quantOf("Qwen3-4B")).toBeNull();
+});
+
+test("groupByNode puts this machine first and keeps each node's order", () => {
+  const m = (id: string, node?: string) => ({ id, node, thinks: false, loaded: false });
+  const groups = groupByNode([m("a@x", "x"), m("b"), m("c@y", "y"), m("d")]);
+  expect(groups.map(([n, ms]) => [n, ms.map((x) => x.id)])).toEqual([
+    [null, ["b", "d"]],
+    ["x", ["a@x"]],
+    ["y", ["c@y"]],
+  ]);
+  expect(groupByNode([m("a@x", "x")]).map(([n]) => n)).toEqual(["x"]);
+});
+
+import { citedIn, linkCitations, parseSources, sourcesOf } from "./agent/sources";
+
+const searchOutput = JSON.stringify([
+  { n: 1, title: "Um", url: "https://www.a.com/x", snippet: "s" },
+  { n: 2, title: "Dois", url: "https://b.org", snippet: "" },
+  { n: 3, title: "Mau", url: "javascript:alert(1)", snippet: "" },
+]);
+
+test("parseSources keeps numbered http(s) results and ignores anything else", () => {
+  expect(parseSources(searchOutput).map((s) => s.n)).toEqual([1, 2]);
+  expect(parseSources("nenhum resultado")).toEqual([]);
+  expect(parseSources("[não é json")).toEqual([]);
+});
+
+test("linkCitations links known sources only, outside code", () => {
+  const known = sourcesOf([
+    { kind: "tool", step: { id: "a", name: "web_search", label: "", subject: "", arguments: {}, needsApproval: false, status: "ok", output: searchOutput } },
+  ]);
+  expect(linkCitations("Fato [1]. Outro [1, 2]. Falso [9].", known)).toBe("Fato [1](#src-1). Outro [1](#src-1)[2](#src-2). Falso [9].");
+  expect(linkCitations("Use `a[1]` e\n```\nb[2]\n```\nok [2]", known)).toBe("Use `a[1]` e\n```\nb[2]\n```\nok [2](#src-2)");
+  expect(linkCitations("já é [1](https://x)", known)).toBe("já é [1](https://x)");
+  expect(citedIn("b [2] a [1] de novo [2]", known)).toEqual([2, 1]);
+  expect(linkCitations("[1]", new Map())).toBe("[1]");
+});
+
+import { bareName } from "./Controls";
+
+test("bareName drops a trailing quantization only", () => {
+  expect(bareName("Qwen3-4B-Q4_K_M")).toBe("Qwen3-4B");
+  expect(bareName("gemma-3-4b-it-q8_0")).toBe("gemma-3-4b-it");
+  expect(bareName("Qwen3-4B")).toBe("Qwen3-4B");
+});

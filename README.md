@@ -45,7 +45,7 @@ lair list             # see what you have
 lair update           # switch to the latest release
 ```
 
-Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. Hugging Face is the usual place to find them; `lair pull` takes the file's download link:
+Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. The easiest way to get more is **Configurações → Modelos** in the web UI: it suggests models that fit your GPU or RAM, searches Hugging Face, and downloads them without a restart. From the terminal, `lair pull` takes a file's download link:
 
 ```bash
 lair pull https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf

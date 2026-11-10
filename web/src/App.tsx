@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AuthError, client, convPath, type Api, type Conversation, type Effort, type FileTypes, type ModelInfo } from "./api";
 import { Chat } from "./Chat";
 import { Sidebar } from "./conversations/Sidebar";
-import { SettingsPanel } from "./settings/SettingsPanel";
+import { SettingsPanel, type Tab } from "./settings/SettingsPanel";
 import { Gate } from "./Gate";
 import { newSignal, Orb, type OrbSignal } from "./Orb";
 import { watchFavicon } from "./favicon";
@@ -92,6 +92,13 @@ function Workspace({ api, models, fileTypes, defaultEffort, signal, onActive, on
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [open, setOpen] = useState(() => (load("sidebar") || (innerWidth > 900 ? "open" : "closed")) === "open");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<Tab | undefined>();
+  // Bumped when a model download finishes, so the chat lists it.
+  const [modelsKey, setModelsKey] = useState(0);
+  const openSettings = (tab?: Tab) => {
+    setSettingsTab(tab);
+    setSettingsOpen(true);
+  };
 
   const refresh = useCallback(() => {
     api.conversations().then(setConversations, (e) => e instanceof AuthError && onAuthLost());
@@ -131,9 +138,15 @@ function Workspace({ api, models, fileTypes, defaultEffort, signal, onActive, on
         current={current}
         onOpen={go}
         onChanged={refresh}
-        onSettings={() => setSettingsOpen(true)}
+        onSettings={() => openSettings()}
       />
-      <SettingsPanel api={api} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsPanel
+        api={api}
+        open={settingsOpen}
+        tab={settingsTab}
+        onClose={() => setSettingsOpen(false)}
+        onModelsChanged={() => setModelsKey((k) => k + 1)}
+      />
       <Chat
         key={visit}
         api={api}
@@ -153,6 +166,8 @@ function Workspace({ api, models, fileTypes, defaultEffort, signal, onActive, on
         onTurnEnd={refresh}
         onNew={() => go(null)}
         onAuthLost={onAuthLost}
+        modelsKey={modelsKey}
+        onMoreModels={() => openSettings("models")}
       />
     </div>
   );

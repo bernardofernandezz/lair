@@ -314,12 +314,18 @@ code {
   position: relative;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
+  gap: 8px;
   width: min(calc(64ch + 40px), calc(100% - 32px));
   margin: 0 auto 24px;
-  padding: 12px 10px 10px 20px;
+  padding: 14px 10px 10px 20px;
   border-radius: 24px;
-  transition: transform 0.9s var(--ease), border-color 0.2s;
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 12px 32px -18px rgb(20 16 30 / 0.35);
+  transition: transform 0.9s var(--ease), border-color 0.2s, box-shadow 0.2s;
+}
+
+.composer:focus-within {
+  border-color: color-mix(in oklab, var(--violet) 45%, var(--line));
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 16px 40px -18px rgb(20 16 30 / 0.45);
 }
 
 .is-empty .composer {
@@ -373,22 +379,22 @@ code {
 .tools {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   margin-left: -10px;
 }
 
 .tools .send {
-  margin-left: 0;
+  margin-left: 4px;
 }
 
-/* The paperclip groups with the send button, away from the control switches. */
-.attach {
-  margin-left: auto;
+/* Pushes the model chip and send button to the right, away from attach and agent. */
+.tools-gap {
+  flex: 1;
 }
 
 .picker {
   position: relative;
-  min-width: 88px;
+  min-width: 0;
 }
 
 .chip {
@@ -417,6 +423,19 @@ code {
   white-space: nowrap;
 }
 
+.chip-mode {
+  flex: none;
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+  color: var(--slate);
+}
+
+.model-chip {
+  height: 36px;
+  color: var(--ink);
+}
+
 .chip svg {
   flex: none;
   width: 18px;
@@ -428,26 +447,36 @@ code {
   stroke-linejoin: round;
 }
 
-.picker ul {
+.picker-panel {
   position: absolute;
-  bottom: calc(100% + 10px);
-  left: 0;
+  right: 0;
+  bottom: calc(100% + 12px);
   z-index: 5;
-  width: max-content;
-  min-width: 260px;
-  max-width: min(420px, calc(100vw - 32px));
-  max-height: 50dvh;
-  margin: 0;
+  display: grid;
+  gap: 4px;
+  width: min(380px, calc(100vw - 32px));
   padding: 6px;
-  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 18px;
   background: var(--mist);
   box-shadow: 0 18px 50px -12px rgb(20 16 30 / 0.28);
+  transform-origin: bottom right;
+  animation: unfold 0.22s var(--ease);
+}
+
+.picker ul {
+  max-height: 44dvh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
   list-style: none;
   outline: none;
-  transform-origin: bottom left;
-  animation: unfold 0.22s var(--ease);
+  border-radius: 12px;
+}
+
+.picker ul:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--violet) 70%, var(--ink));
+  outline-offset: -2px;
 }
 
 @keyframes unfold {
@@ -457,10 +486,10 @@ code {
   }
 }
 
-.picker li {
+.picker li[role="option"] {
   display: grid;
-  gap: 1px;
-  padding: 10px 14px;
+  gap: 4px;
+  padding: 9px 12px;
   border-radius: 12px;
   cursor: pointer;
 }
@@ -473,13 +502,116 @@ code {
   font-weight: 650;
 }
 
+.picker li[aria-selected="true"] .option-name::after {
+  content: " ✓";
+  color: var(--slate);
+  font-weight: 400;
+}
+
+.group-head {
+  padding: 10px 12px 4px;
+  color: var(--slate);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.tag.is-on {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--teal) 22%, transparent);
+  color: var(--ink);
+}
+
+.picker-section {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px 8px;
+  border-top: 1px solid var(--line);
+}
+
+.picker-label {
+  color: var(--slate);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.picker-hint {
+  color: var(--slate);
+  font-size: 13px;
+}
+
+.picker-more {
+  padding: 10px 12px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 12px 12px;
+  background: none;
+  color: var(--slate);
+  font-size: 14px;
+  text-align: left;
+}
+
+.picker-more:hover {
+  background: var(--haze);
+  color: var(--ink);
+}
+
+.context-meter {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 36px;
+}
+
+.context-meter svg {
+  width: 18px;
+  height: 18px;
+  transform: rotate(-90deg);
+  fill: none;
+  stroke-width: 3;
+}
+
+.context-meter circle:first-child {
+  stroke: var(--line);
+}
+
+.context-meter circle:last-child {
+  stroke: var(--slate);
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.6s var(--ease);
+}
+
+.context-meter.is-full circle:last-child {
+  stroke: var(--danger);
+}
+
+.option-name {
+  font-weight: 650;
+}
+
 .option-name {
   overflow-wrap: anywhere;
 }
 
 .option-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   color: var(--slate);
-  font-size: 13px;
 }
 
 .segmented {
@@ -761,7 +893,9 @@ code {
 
 .scene-actions {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
   margin-left: auto;
 }
@@ -1141,7 +1275,9 @@ a.ref-chip {
 /* Agent: mode toggle and tool steps */
 
 .agent-toggle {
-  padding: 6px 12px;
+  gap: 6px;
+  height: 36px;
+  padding: 6px 12px 6px 10px;
 }
 
 .agent-toggle.is-on {
@@ -1921,19 +2057,30 @@ a.ref-chip {
   .set-grid .flag-note {
     margin-top: -8px;
   }
-  /* Reasoning modes get their own row so the model, agent switch and send button stay reachable. */
-  .tools {
-    flex-wrap: wrap;
-    row-gap: 8px;
+  /* One row on phones: the agent switch shrinks to its icon and the model name gives way. */
+  .agent-toggle span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
-  .segmented {
-    flex: 1 1 100%;
-    order: 3;
+  .agent-toggle {
+    padding: 6px 9px;
   }
   .tools .picker {
-    /* Base 0: the model name gives way so agent, attach and send keep one row. */
-    flex: 1 1 0;
+    flex: 0 1 auto;
     min-width: 0;
+    /* The panel then anchors to the composer, which spans the screen, instead of the chip. */
+    position: static;
+  }
+  .picker-panel {
+    left: 0;
+    right: 0;
+    width: auto;
+  }
+  .chip-mode {
+    display: none;
   }
   .mark {
     left: 16px;
@@ -1956,4 +2103,248 @@ a.ref-chip {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* Web search: results in the tool card, citation badges in the answer */
+
+.search-results {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+
+.search-results li {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  column-gap: 8px;
+  padding: 8px 6px;
+  border-radius: 10px;
+}
+
+.search-results li:hover {
+  background: var(--haze);
+}
+
+.search-n {
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 6px;
+  background: var(--haze);
+  color: var(--slate);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.search-results a {
+  display: grid;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.search-domain {
+  color: var(--slate);
+  font-size: 12px;
+}
+
+.search-title {
+  overflow: hidden;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-results a:hover .search-title {
+  text-decoration: underline;
+}
+
+.search-snippet {
+  grid-column: 2;
+  display: -webkit-box;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--slate);
+  font-size: 13px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.page-text {
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.page-title {
+  margin: 0 0 6px;
+  font-weight: 550;
+}
+
+.page-text .tool-detail {
+  padding: 0;
+  border-top: 0;
+}
+
+.tool-detail.is-clamped {
+  max-height: 7.5em;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 60%, transparent);
+}
+
+.page-more {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.cite {
+  display: inline-block;
+  max-width: 18ch;
+  margin: 0 2px;
+  padding: 0 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--haze);
+  color: var(--slate);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  vertical-align: 0.1em;
+  white-space: nowrap;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.cite:hover {
+  background: var(--ink);
+  color: var(--mist);
+}
+
+.sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 12px 0 0;
+}
+
+.sources-label {
+  margin-right: 4px;
+  color: var(--slate);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Settings → Modelos: hardware, recommendations, Hugging Face search, downloads */
+
+.models-tab {
+  display: grid;
+  gap: 20px;
+}
+
+.models-tab section {
+  display: grid;
+  gap: 8px;
+}
+
+.hw-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--slate);
+  font-size: 14px;
+}
+
+.models-head {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.models-tab .skill-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.models-tab .option-meta {
+  margin-top: 4px;
+}
+
+.skill-list li.is-best {
+  border-color: color-mix(in oklab, var(--teal) 60%, var(--line));
+}
+
+.tag.fit-fits {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--teal) 24%, transparent);
+  color: var(--ink);
+}
+
+.tag.fit-tight {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--gold) 28%, transparent);
+  color: var(--ink);
+}
+
+.tag.fit-no {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--danger) 18%, transparent);
+  color: var(--ink);
+}
+
+.download progress {
+  width: 100%;
+  height: 6px;
+  margin-top: 6px;
+  accent-color: var(--teal);
+}
+
+.repo-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.repo-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: none;
+  text-align: left;
+}
+
+.repo-head:hover,
+.repo-head[aria-expanded="true"] {
+  background: var(--haze);
+}
+
+.repo-files {
+  padding: 8px 0 4px 12px;
+}
+
+.models-tab .skill-actions .solid,
+.models-tab .skill-actions .ghost {
+  padding: 6px 16px;
+  font-size: 14px;
 }

@@ -137,6 +137,12 @@ pub struct ModelEntry {
     /// Sees images (a projector was found next to it). Peers on older versions don't send it.
     #[serde(default)]
     pub vision: bool,
+    /// File size in bytes, to show and to judge whether it fits; 0 from older peers.
+    #[serde(default)]
+    pub size: u64,
+    /// Context size in tokens it runs with; 0 from older peers.
+    #[serde(default)]
+    pub ctx: u32,
 }
 
 /// The loaded model's one context, reused across generations instead of allocated for each.
@@ -197,6 +203,8 @@ impl Session<'_> {
 /// Every model found on disk; at most one is in memory at a time.
 pub struct Engine {
     backend: LlamaBackend,
+    /// Where models were looked for, to look again after a download.
+    paths: Vec<PathBuf>,
     gpu_layers: u32,
     n_ctx: u32,
     catalog: Vec<ModelInfo>,
@@ -211,36 +219,34 @@ impl Engine {
         if std::env::var_os("LAIR_VERBOSE").is_none() {
             backend.void_logs();
         }
-        let mut files = Vec::new();
-        for p in paths {
-            collect_gguf(p, &mut files).with_context(|| format!("reading {}", p.display()))?;
-        }
-        files.sort();
-        let (projectors, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| is_mmproj(p));
-        let mut catalog: Vec<ModelInfo> = Vec::new();
-        for path in files {
-            let id = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-            if catalog.iter().any(|m| m.id == id) {
-                eprintln!("skipping {}: another model is already called {id}", path.display());
-                continue;
-            }
-            match probe(&backend, &path) {
-                Ok(thinks) => catalog.push(ModelInfo { id, path, thinks, mmproj: None }),
-                Err(e) => eprintln!("skipping {}: {e:#}", path.display()),
-            }
-        }
+        let catalog = scan(&backend, paths, &[]);
         if catalog.is_empty() {
             bail!("no usable .gguf chat models in {paths:?}");
         }
-        let all: Vec<PathBuf> = catalog.iter().map(|m| m.path.clone()).collect();
-        for m in &mut catalog {
-            m.mmproj = projector_for(&m.path, &all, &projectors);
+        Ok(Self { backend, paths: paths.to_vec(), gpu_layers, n_ctx, catalog, loaded: None })
+    }
+
+    /// Looks for models again, keeping the one in memory if its file is still there.
+    pub fn rescan(&mut self) {
+        let loaded = self.loaded().map(str::to_owned);
+        self.catalog = scan(&self.backend, &self.paths, &self.catalog);
+        match loaded.and_then(|id| self.catalog.iter().position(|m| m.id == id)) {
+            Some(i) => self.loaded.as_mut().unwrap().0 = i,
+            None => self.loaded = None,
         }
-        Ok(Self { backend, gpu_layers, n_ctx, catalog, loaded: None })
+    }
+
+    /// The first folder models are looked for in: where downloads go.
+    pub fn models_dir(&self) -> Option<&Path> {
+        self.paths.iter().find(|p| p.is_dir()).map(PathBuf::as_path)
     }
 
     pub fn models(&self) -> &[ModelInfo] {
         &self.catalog
+    }
+
+    pub fn ctx(&self) -> u32 {
+        self.n_ctx
     }
 
     pub fn loaded(&self) -> Option<&str> {
@@ -388,6 +394,39 @@ impl Engine {
             Ok(Done { prompt_tokens, completion_tokens: produced, finish_reason })
         })
     }
+}
+
+/// Every usable chat model under `paths`. Files already in `known` are not probed again.
+fn scan(backend: &LlamaBackend, paths: &[PathBuf], known: &[ModelInfo]) -> Vec<ModelInfo> {
+    let mut files = Vec::new();
+    for p in paths {
+        if let Err(e) = collect_gguf(p, &mut files) {
+            eprintln!("reading {}: {e}", p.display());
+        }
+    }
+    files.sort();
+    let (projectors, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| is_mmproj(p));
+    let mut catalog: Vec<ModelInfo> = Vec::new();
+    for path in files {
+        let id = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        if catalog.iter().any(|m| m.id == id) {
+            eprintln!("skipping {}: another model is already called {id}", path.display());
+            continue;
+        }
+        if let Some(m) = known.iter().find(|m| m.path == path) {
+            catalog.push(ModelInfo { mmproj: None, ..m.clone() });
+            continue;
+        }
+        match probe(backend, &path) {
+            Ok(thinks) => catalog.push(ModelInfo { id, path, thinks, mmproj: None }),
+            Err(e) => eprintln!("skipping {}: {e:#}", path.display()),
+        }
+    }
+    let all: Vec<PathBuf> = catalog.iter().map(|m| m.path.clone()).collect();
+    for m in &mut catalog {
+        m.mmproj = projector_for(&m.path, &all, &projectors);
+    }
+    catalog
 }
 
 pub(crate) fn collect_gguf(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {

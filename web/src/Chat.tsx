@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { AuthError, ConnectionLost, type Api, type Conversation, type Effort, type FileTypes, type ModelInfo, type Ref, type UploadedFile } from "./api";
 import { Composer, type Pending } from "./Composer";
-import { isEffort, ModelPicker, ReasoningControl } from "./Controls";
+import { ContextMeter, isEffort, ModelChip } from "./Controls";
 import { pulse, settle, typed, type OrbSignal } from "./Orb";
 import { load, save } from "./storage";
 import { Turns } from "./Turns";
@@ -24,9 +24,13 @@ type Props = {
   onTurnEnd: () => void;
   onNew: () => void;
   onAuthLost: () => void;
+  /** Opens the place to download more models. */
+  onMoreModels?: () => void;
+  /** Changes when the set of models on disk changed. */
+  modelsKey?: number;
 };
 
-export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onOpen, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost }: Props) {
+export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onOpen, conversationId, conversations, signal, onActive, onCreated, onTurnEnd, onNew, onAuthLost, onMoreModels, modelsKey }: Props) {
   const [models, setModels] = useState(initialModels);
   const [model, setModel] = useState(() => {
     const saved = load("model");
@@ -41,6 +45,8 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
   const [turns, setTurns] = useState<Turn[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // shortcut: unknown after a reload until the next reply; store it per message if that matters.
+  const [tokens, setTokens] = useState(0);
   const conv = useRef(conversationId);
   const abort = useRef<AbortController | null>(null);
   const log = useRef<HTMLDivElement>(null);
@@ -53,6 +59,9 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
   useEffect(() => onActive(active), [active, onActive]);
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => save("model", model), [model]);
+  useEffect(() => {
+    if (modelsKey) api.models().then(setModels, () => {});
+  }, [api, modelsKey]);
   useEffect(() => save("effort", effort ?? ""), [effort]);
 
   useEffect(() => {
@@ -124,6 +133,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
             pulse(sig, true);
             break;
           case "done":
+            setTokens(e.data.tokens ?? 0);
             return;
         }
         show();
@@ -207,8 +217,6 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
         onStop={() => abort.current?.abort()}
         tools={
           <>
-            <ModelPicker models={models} value={model} onChange={setModel} disabled={busy} />
-            <ReasoningControl value={effort ?? defaultEffort} onChange={setEffort} available={current.thinks} />
             <button
               type="button"
               className={`chip agent-toggle${agent ? " is-on" : ""}`}
@@ -216,8 +224,22 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
               title="Deixa o modelo usar ferramentas: arquivos do workspace, shell, web e suas conversas. Ações que mudam algo pedem sua aprovação."
               onClick={() => setAgent((a) => !a)}
             >
-              Agente
+              <svg viewBox="0 0 24 24" aria-hidden>
+                <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" />
+              </svg>
+              <span>Agente</span>
             </button>
+            <span className="tools-gap" />
+            <ContextMeter used={tokens} size={current.ctx ?? 0} />
+            <ModelChip
+              models={models}
+              value={model}
+              onChange={setModel}
+              effort={effort ?? defaultEffort}
+              onEffort={setEffort}
+              disabled={busy}
+              onMore={onMoreModels}
+            />
           </>
         }
       />

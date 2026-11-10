@@ -1,5 +1,6 @@
 /** `node` is the peer machine the model runs on; absent for this one. */
-export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean };
+/** `size` is the file's bytes and `ctx` the context it runs with; both 0 from older peers. */
+export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean; size?: number; ctx?: number };
 
 /** A model's own name: a peer's models are listed as `name@node`. */
 export const modelName = (m: ModelInfo) => (m.node ? m.id.slice(0, -(m.node.length + 1)) : m.id);
@@ -63,6 +64,15 @@ export type Skill = {
 export type SkillDraft = Pick<Skill, "name" | "description" | "when" | "prompt">;
 export type IndexEntry = { id: string; name: string; description: string; url: string };
 
+/** How a model file compares with this machine: all on the GPU (or RAM), partly on the CPU, or not at all. */
+export type Fit = "fits" | "tight" | "no";
+export type Hardware = { gpus: string[]; vram: number; ram: number };
+export type HubFile = { name: string; size: number; mmproj: boolean; fit: Fit; installed: boolean };
+export type HubRepo = { id: string; downloads: number; likes: number };
+/** A curated repo with the file recommended for this machine; `best` is the most capable that fits. */
+export type Suggestion = { repo: string; about: string; pick: HubFile | null; vision: boolean; best: boolean };
+export type Download = { repo: string; file: string; done: number; total: number; finished: boolean; error?: string };
+
 /** Who a node on the tailnet says it is. */
 export type NodeInfo = { name: string; version: string; models: ModelInfo[] };
 
@@ -102,7 +112,7 @@ export type TurnEvent =
   | { event: "answer"; data: { text: string } }
   | { event: "tool_call"; data: ToolCall }
   | { event: "tool_result"; data: ToolResult }
-  | { event: "done"; data: { message: number; finish_reason: "stop" | "length" } };
+  | { event: "done"; data: { message: number; finish_reason: "stop" | "length"; tokens?: number } };
 
 export class AuthError extends Error {}
 
@@ -187,6 +197,15 @@ export function client(token: string) {
     /** A skill in a `.zip`, read from the user's disk. */
     uploadSkill: (file: File) => upload<Skill>("/lair/v1/skills/upload", one("file", file)),
     skillsIndex: () => get<{ configured: boolean; skills: { entry: IndexEntry; installed: boolean }[] }>("/lair/v1/skills/index"),
+
+    hardware: () => get<Hardware>("/lair/v1/hub/hardware"),
+    suggested: () => get<Suggestion[]>("/lair/v1/hub/suggested"),
+    searchHub: (q: string) => get<HubRepo[]>(`/lair/v1/hub/search?q=${encodeURIComponent(q)}`),
+    hubFiles: (repo: string) => get<{ files: HubFile[]; pick: string | null }>(`/lair/v1/hub/files?repo=${encodeURIComponent(repo)}`),
+    downloads: () => get<Download[]>("/lair/v1/hub/downloads"),
+    download: (repo: string, file: string) => send<void>("POST", "/lair/v1/hub/downloads", { repo, file }),
+    /** Cancels a running download, or dismisses a finished or failed one. */
+    cancelDownload: (file: string) => send<void>("DELETE", `/lair/v1/hub/downloads/${encodeURIComponent(file)}`),
 
     settings: () => get<Settings>("/lair/v1/settings"),
     /** Changes the named settings; `""` clears one, the others stay. */

@@ -4,6 +4,7 @@ mod attach;
 mod chat;
 mod config;
 mod engine;
+mod hub;
 mod jail;
 mod lair;
 mod models;
@@ -231,40 +232,17 @@ fn models_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Downloads a .gguf into `dir`, showing progress. Saved as `.part` and renamed only when complete,
-/// so an interrupted download never looks like a model.
+/// Downloads a .gguf into `dir`, printing progress every 5%.
 async fn download(url: &str, dir: &std::path::Path) -> Result<PathBuf> {
-    let name = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .rsplit('/')
-        .next()
-        .filter(|n| n.ends_with(".gguf"))
-        .context("the URL must point to a .gguf file")?;
-    let (dest, part) = (dir.join(name), dir.join(format!("{name}.part")));
-    let http = net::download_client();
     eprintln!("downloading {url}");
-    let mut resp =
-        http.get(url).send().await.and_then(|r| r.error_for_status()).with_context(|| format!("downloading {url}"))?;
-    let total = resp.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&part).await.with_context(|| {
-        format!("{} is not writable; put a .gguf in it or mount it with write access", dir.display())
-    })?;
-    let (mut done, mut shown) = (0u64, 0u64);
-    while let Some(chunk) = resp.chunk().await.with_context(|| format!("downloading {url}"))? {
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
-        done += chunk.len() as u64;
+    let mut shown = 0;
+    let dest = hub::download(url, dir, |done, total| {
         if total > 0 && done * 20 / total > shown {
             shown = done * 20 / total;
             eprintln!("  {}% of {} MB", shown * 5, total / 1_000_000);
         }
-    }
-    tokio::io::AsyncWriteExt::flush(&mut file).await?;
-    if total > 0 && done != total {
-        anyhow::bail!("download ended early ({done} of {total} bytes); run it again to retry");
-    }
-    tokio::fs::rename(&part, &dest).await?;
+    })
+    .await?;
     eprintln!("saved {}", dest.display());
     Ok(dest)
 }
@@ -349,6 +327,7 @@ async fn main() -> Result<()> {
                 assets: Assets::new(&skills.assets),
                 workspace,
                 approvals: Approvals::default(),
+                downloads: hub::Downloads::default(),
                 params: defaults,
                 // ~3 characters per token; half the context for history, half for the reply.
                 history_chars: model.ctx as usize * 3 / 2,

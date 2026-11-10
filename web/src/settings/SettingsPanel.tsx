@@ -3,12 +3,22 @@ import type { Api, Config, Settings } from "../api";
 import { modelName } from "../api";
 import { isEffort, MODES } from "../Controls";
 import { SkillsTab } from "../skills/SkillsPanel";
+import { ModelsTab } from "./ModelsTab";
 
-type Props = { api: Api; open: boolean; onClose: () => void };
-type Tab = "general" | "tailnet" | "skills" | "system";
+export type Tab = "general" | "models" | "tailnet" | "skills" | "system";
+type Props = {
+  api: Api;
+  open: boolean;
+  onClose: () => void;
+  /** The tab shown when the panel opens; the last one used otherwise. */
+  tab?: Tab;
+  /** A model finished downloading. */
+  onModelsChanged: () => void;
+};
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "general", label: "Geral" },
+  { id: "models", label: "Modelos" },
   { id: "tailnet", label: "Tailnet" },
   { id: "skills", label: "Skills" },
   { id: "system", label: "Sistema" },
@@ -17,7 +27,7 @@ const TABS: { id: Tab; label: string }[] = [
 /** Saves `change` on top of everything else the UI saved, then says `what` was saved. */
 type Save = (change: Config, what: string) => Promise<void>;
 
-export function SettingsPanel({ api, open, onClose }: Props) {
+export function SettingsPanel({ api, open, onClose, tab: openOn, onModelsChanged }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<Tab>("general");
   const [st, setSt] = useState<Settings | null>(null);
@@ -32,10 +42,11 @@ export function SettingsPanel({ api, open, onClose }: Props) {
     if (!d) return;
     if (open && !d.open) {
       d.showModal();
+      if (openOn) setTab(openOn);
       setNotice(null);
       refresh();
     } else if (!open && d.open) d.close();
-  }, [open, refresh]);
+  }, [open, refresh, openOn]);
 
   const save: Save = async (change, what) => {
     try {
@@ -78,6 +89,15 @@ export function SettingsPanel({ api, open, onClose }: Props) {
       )}
 
       {st && tab === "general" && <General st={st} save={save} />}
+      {tab === "models" && (
+        <ModelsTab
+          api={api}
+          onInstalled={() => {
+            refresh();
+            onModelsChanged();
+          }}
+        />
+      )}
       {st && tab === "tailnet" && <Tailnet st={st} save={save} />}
       {tab === "skills" && (
         <>
