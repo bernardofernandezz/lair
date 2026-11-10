@@ -19,13 +19,15 @@ ENV CARGO_BUILD_JOBS=${BUILD_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 RUN apt-get update && apt-get install -y --no-install-recommends cmake clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# Dependencies first, in their own layer: it is rebuilt only when Cargo.toml/Cargo.lock change, so a
+# remote cache (see release.yml) skips llama.cpp's build when only lair's own code changed.
 COPY Cargo.toml Cargo.lock build.rs ./
+RUN mkdir -p src web/dist && echo "fn main() {}" > src/main.rs \
+    && nice -n 19 cargo build --release && rm -rf src
 COPY src src
 COPY skills skills
 COPY --from=web /web/dist web/dist
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target,id=lair-target-cpu \
-    nice -n 19 cargo build --release && cp target/release/lair /lair
+RUN touch src/main.rs && nice -n 19 cargo build --release && cp target/release/lair /lair
 
 FROM debian:bookworm-slim AS cpu
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
@@ -48,13 +50,14 @@ ENV CMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH}
 # No GPU driver during the build; link against the toolkit's stub libcuda instead.
 ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
 WORKDIR /src
+# Dependencies first, as in build-cpu: this layer holds the CUDA kernels, the slow part of the build.
 COPY Cargo.toml Cargo.lock build.rs ./
+RUN mkdir -p src web/dist && echo "fn main() {}" > src/main.rs \
+    && nice -n 19 cargo build --release --features cuda && rm -rf src
 COPY src src
 COPY skills skills
 COPY --from=web /web/dist web/dist
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target,id=lair-target-cuda \
-    nice -n 19 cargo build --release --features cuda && cp target/release/lair /lair
+RUN touch src/main.rs && nice -n 19 cargo build --release --features cuda && cp target/release/lair /lair
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04 AS cuda
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \

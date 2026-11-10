@@ -10,8 +10,22 @@ permissions:
   contents: write
   packages: write
 
+# A tag pushed again replaces the run still going for it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # `lair update` compares the binary's version to the tag, so they must agree; checked once, before any build.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml || { echo "Cargo.toml version doesn't match tag $GITHUB_REF_NAME"; exit 1; }
+
   binaries:
+    needs: check
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,8 +45,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      # `lair update` compares the binary's version to the tag, so they must agree.
-      - run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml || { echo "Cargo.toml version doesn't match tag $GITHUB_REF_NAME"; exit 1; }
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev ${{ matrix.apt }}
       - uses: oven-sh/setup-bun@v2
@@ -48,6 +60,8 @@ jobs:
           files: ${{ matrix.asset }}.tar.gz
 
   image:
+    needs: check
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -81,5 +95,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/lair:${{ matrix.target }}
             ghcr.io/${{ github.repository_owner }}/lair:${{ github.ref_name }}-${{ matrix.target }}
             ${{ matrix.target == 'cuda' && format('ghcr.io/{0}/lair:latest', github.repository_owner) || '' }}
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          # In the registry, not the Actions cache: that one is scoped per tag, so no release could reuse
+          # the last one's. mode=max keeps the dependency layer (llama.cpp, the CUDA kernels).
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/lair:buildcache-${{ matrix.target }}
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/lair:buildcache-${{ matrix.target }},mode=max
