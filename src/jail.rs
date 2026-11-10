@@ -69,6 +69,11 @@ mod tests {
             assert!(existing(&root, bad).is_err(), "{bad}");
             assert!(creatable(&root, bad).is_err(), "{bad}");
         }
+        #[cfg(windows)]
+        for bad in [r"C:\Windows\win.ini", r"C:x", r"\x", r"..\x", r"a\..\..\x"] {
+            assert!(existing(&root, bad).is_err(), "{bad}");
+            assert!(creatable(&root, bad).is_err(), "{bad}");
+        }
         assert!(creatable(&root, "new/dir/file.md").is_ok());
         let _ = std::fs::remove_dir_all(root);
     }

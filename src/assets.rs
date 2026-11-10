@@ -124,12 +124,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_cannot_escape_the_root() {
         let dir = temp("symlink");
         let outside = temp("symlink-outside");
         std::fs::write(outside.join("secret.glb"), b"secret").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(outside.join("secret.glb"), dir.join("link.glb")).unwrap();
         let a = Assets::new(std::slice::from_ref(&dir));
         assert!(a.resolve("link.glb").is_none());

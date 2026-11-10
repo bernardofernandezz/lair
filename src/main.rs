@@ -61,13 +61,13 @@ enum Cmd {
     Pull {
         /// URL of the .gguf file, e.g. https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf
         url: String,
-        /// Folder to save it in (default: ~/.local/share/lair/models)
+        /// Folder to save it in (default: ~/.local/share/lair/models, or %LOCALAPPDATA%\lair\models on Windows)
         #[arg(short = 'm', long = "models")]
         models: Option<PathBuf>,
     },
     /// List the models in the models folder
     List {
-        /// Folder to look in (default: ~/.local/share/lair/models)
+        /// Folder to look in (default: ~/.local/share/lair/models, or %LOCALAPPDATA%\lair\models on Windows)
         #[arg(short = 'm', long = "models")]
         models: Option<PathBuf>,
     },
@@ -85,7 +85,8 @@ enum Cmd {
         /// Require `Authorization: Bearer <token>` on the API
         #[arg(long, env = "LAIR_TOKEN")]
         token: Option<String>,
-        /// Where conversations and installed skills are kept (default: ~/.local/share/lair)
+        /// Where conversations and installed skills are kept (default: ~/.local/share/lair, or
+        /// %LOCALAPPDATA%\lair on Windows)
         #[arg(long, env = "LAIR_DATA")]
         data: Option<PathBuf>,
         /// Folder the agent's file and shell tools work in (default: <data>/workspace)
@@ -123,7 +124,11 @@ impl NetworkArgs {
         let peers = Peers::new(socket, port, http);
         let auto = match peers.status().await {
             Some(s) if !s.host.is_empty() => s.host,
-            _ => std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_owned()).unwrap_or_default(),
+            _ => std::fs::read_to_string("/etc/hostname")
+                .map(|h| h.trim().to_owned())
+                .ok()
+                .or_else(|| std::env::var("COMPUTERNAME").ok())
+                .unwrap_or_default(),
         };
         let auto = if auto.is_empty() { "lair".to_owned() } else { auto };
         eprintln!("node name {auto}{}", if tailnet { ", looking for peers on the tailnet" } else { "" });
@@ -248,6 +253,10 @@ async fn download(url: &str, dir: &std::path::Path) -> Result<PathBuf> {
 }
 
 fn default_data_dir() -> Result<PathBuf> {
+    if cfg!(windows) {
+        let base = std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set; pass --data")?;
+        return Ok(PathBuf::from(base).join("lair"));
+    }
     let base = match std::env::var_os("XDG_DATA_HOME") {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set; pass --data")?).join(".local/share"),
