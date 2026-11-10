@@ -5,6 +5,9 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { loadAsset } from "./assets";
 import type { Geometry, Light, Material, Node, Scene, Vec3 } from "./schema";
+import { pick } from "../i18n";
+
+const T = pick({ en: { webgl: "Couldn't start WebGL: " }, pt: { webgl: "Não foi possível abrir o WebGL: " } });
 
 type Props = {
   scene: Scene;
@@ -582,7 +585,10 @@ class CanvasBoundary extends Component<{ children: ReactNode }, { error?: string
   }
   render() {
     if (this.state.error) {
-      return <p className="scene-error">Não foi possível abrir o WebGL: {this.state.error}</p>;
+      return <p className="scene-error">
+          {T.webgl}
+          {this.state.error}
+        </p>;
     }
     return this.props.children;
   }

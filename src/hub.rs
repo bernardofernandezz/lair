@@ -14,14 +14,14 @@ const HF: &str = "https://huggingface.co";
 
 /// Open GGUF repos shown before any search, smallest first; the best fit among them is recommended.
 pub const SUGGESTED: &[(&str, &str)] = &[
-    ("bartowski/Llama-3.2-3B-Instruct-GGUF", "Pequeno e rápido; bom para máquinas modestas."),
-    ("Qwen/Qwen3-4B-GGUF", "Raciocina; o padrão do lair."),
+    ("bartowski/Llama-3.2-3B-Instruct-GGUF", "Small and fast; good for modest machines."),
+    ("Qwen/Qwen3-4B-GGUF", "Reasons; lair's default."),
     ("ggml-org/gemma-3-4b-it-GGUF", "Enxerga imagens; leve."),
-    ("ggml-org/Qwen2.5-VL-7B-Instruct-GGUF", "Enxerga imagens; lê bem documentos e telas."),
-    ("Qwen/Qwen3-8B-GGUF", "Raciocina; bom equilíbrio para uso diário."),
+    ("ggml-org/Qwen2.5-VL-7B-Instruct-GGUF", "Sees images; reads documents and screens well."),
+    ("Qwen/Qwen3-8B-GGUF", "Reasons; a good balance for daily use."),
     ("ggml-org/gemma-3-12b-it-GGUF", "Enxerga imagens; respostas mais cuidadosas."),
-    ("Qwen/Qwen3-14B-GGUF", "Raciocina; mais capaz, pede uma GPU maior."),
-    ("Qwen/Qwen3-30B-A3B-GGUF", "Raciocina; grande, mas rápido (MoE)."),
+    ("Qwen/Qwen3-14B-GGUF", "Reasons; more capable, needs a bigger GPU."),
+    ("Qwen/Qwen3-30B-A3B-GGUF", "Reasons; big but fast (MoE)."),
     ("Qwen/Qwen3-32B-GGUF", "Raciocina; o mais capaz da lista."),
 ];
 
@@ -92,7 +92,7 @@ pub async fn files(http: &reqwest::Client, repo: &str) -> Result<Vec<(String, u6
     check_repo(repo)?;
     let resp = http.get(format!("{HF}/api/models/{repo}/tree/main")).send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND || resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        bail!("repositório {repo} não encontrado ou com acesso restrito");
+        bail!("repo {repo} not found or gated");
     }
     let entries: Vec<Entry> = resp.error_for_status()?.json().await.context("resposta inesperada do Hugging Face")?;
     Ok(entries
@@ -123,7 +123,7 @@ pub fn check_repo(repo: &str) -> Result<()> {
     };
     match repo.split_once('/') {
         Some((owner, name)) if ok(owner) && ok(name) => Ok(()),
-        _ => bail!("\"{repo}\" não é um repositório do Hugging Face (dono/nome)"),
+        _ => bail!("\"{repo}\" is not a Hugging Face repo (owner/name)"),
     }
 }
 
@@ -271,10 +271,10 @@ impl Downloads {
 /// Starts downloading `file` from `repo`, with the smallest projector if the repo has one. The file
 /// must be one the repo lists; the URL is built here, never taken from the client.
 pub async fn start(lair: Arc<Lair>, repo: String, file: String) -> Result<()> {
-    let dir = lair.models.dir().context("nenhuma pasta de modelos com permissão de escrita")?.join(folder(&repo));
+    let dir = lair.models.dir().context("no writable models folder")?.join(folder(&repo));
     let listed = files(&lair.http, &repo).await?;
     if !listed.iter().any(|(n, _)| *n == file) {
-        bail!("{file} não está em {repo}");
+        bail!("{file} is not in {repo}");
     }
     let mut queue = vec![file.clone()];
     if !file.to_ascii_lowercase().contains("mmproj")
@@ -288,7 +288,7 @@ pub async fn start(lair: Arc<Lair>, repo: String, file: String) -> Result<()> {
     // One lock from the check to the abort handle: a cancel can never miss a download that started.
     let mut list = lair.downloads.list.lock().unwrap();
     if list.get(&file).is_some_and(|(p, _)| !p.finished && p.error.is_none()) {
-        bail!("{file} já está sendo baixado");
+        bail!("{file} is already downloading");
     }
     let total = listed.iter().filter(|(n, _)| queue.contains(n)).map(|(_, s)| s).sum();
     let p = Progress { repo: repo.clone(), file: file.clone(), done: 0, total, finished: false, error: None };

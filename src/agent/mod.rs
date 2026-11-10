@@ -139,7 +139,7 @@ fn parse_json(body: &str) -> Result<Call, String> {
         arguments: Value,
     }
     let raw: Raw =
-        serde_json::from_str(body.trim()).map_err(|e| format!("a chamada não é JSON válido ({e}): {}", body.trim()))?;
+        serde_json::from_str(body.trim()).map_err(|e| format!("the call is not valid JSON ({e}): {}", body.trim()))?;
     let arguments = if raw.arguments.is_null() { Value::Object(Default::default()) } else { raw.arguments };
     Ok(Call { name: raw.name, arguments })
 }
@@ -169,7 +169,7 @@ fn python_end(s: &str) -> Option<usize> {
 
 /// Parses `name(key='value', n=2, flag=True)` into a call with JSON arguments.
 fn parse_python(src: &str) -> Result<Call, String> {
-    let err = |why: &str| format!("chamada inválida ({why}): {src}");
+    let err = |why: &str| format!("invalid call ({why}): {src}");
     let open = src.find('(').ok_or_else(|| err("faltou '('"))?;
     let body = src[open + 1..].trim_end().strip_suffix(')').unwrap_or(&src[open + 1..]);
     let mut p = Py { s: body.chars().collect(), i: 0 };
@@ -187,7 +187,7 @@ fn parse_python(src: &str) -> Result<Call, String> {
         args.insert(key, p.value().map_err(|w| err(&w))?);
         p.ws();
         if !p.eat(',') && !p.done() {
-            return Err(err("separe os argumentos com vírgula"));
+            return Err(err("separate the arguments with commas"));
         }
     }
     Ok(Call { name: src[..open].trim().to_owned(), arguments: Value::Object(args) })
@@ -229,7 +229,7 @@ impl Py {
                 self.i += 1;
                 let mut out = String::new();
                 loop {
-                    let c = self.peek().ok_or("texto sem aspas de fechamento")?;
+                    let c = self.peek().ok_or("string without a closing quote")?;
                     self.i += 1;
                     match c {
                         '\\' => {

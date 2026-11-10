@@ -7,6 +7,12 @@ import { MAX_CANVASES, SceneCard } from "./scene/SceneCard";
 import { splitMessage, type Segment } from "./scene/split";
 import { convPath } from "./api";
 import { hasText, type AssistantTurn, type Attached, type Turn } from "./parts";
+import { pick } from "./i18n";
+
+const T = pick({
+  en: { attached: "Document attached to the message", loading: "Loading ", preparing: "Getting the answer ready", skill: "Skill in use", sources: "Sources", thinking: "Thinking", thought: (s: number) => `Thought for ${s} s`, reasoning: "Reasoning" },
+  pt: { attached: "Documento anexado à mensagem", loading: "Carregando ", preparing: "Preparando a resposta", skill: "Skill ativada", sources: "Fontes", thinking: "Pensando", thought: (s: number) => `Pensou por ${s} s`, reasoning: "Raciocínio" },
+});
 
 type Props = {
   turns: Turn[];
@@ -76,7 +82,7 @@ export function Turns({ turns, live, loading, onDecide, fileUrl, onOpen }: Props
                     </a>
                   ))}
                   {t.attachments?.filter((a) => !a.image).map((a, j) => (
-                    <span key={`${j}-${a.name}`} className={`ref-chip is-file`} title="Documento anexado à mensagem">
+                    <span key={`${j}-${a.name}`} className={`ref-chip is-file`} title={T.attached}>
                       <svg viewBox="0 0 24 24" aria-hidden>
                         <path d="M7 5h7l5 5v9a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM13 5v6h6" />
                       </svg>
@@ -142,11 +148,11 @@ function Reply({
   return (
     <li className="turn assistant" aria-busy={live}>
       {live && !turn.reasoning && turn.parts.length === 0 && (
-        <p className="status">{loading ? `Carregando ${loading}` : "Preparando a resposta"}</p>
+        <p className="status">{loading ? T.loading + loading : T.preparing}</p>
       )}
       {turn.reasoning && <Reasoning text={turn.reasoning} thinking={thinking} ms={turn.thinkMs} />}
       {turn.skill && (
-        <p className="skills" aria-label="Skill ativada">
+        <p className="skills" aria-label={T.skill}>
           <span className="skill">
             <span className="skill-dot" aria-hidden />
             {turn.skill.name}
@@ -173,8 +179,8 @@ function Reply({
         ),
       )}
       {!live && listed.length > 0 && (
-        <p className="sources" aria-label="Fontes">
-          <span className="sources-label">Fontes</span>
+        <p className="sources" aria-label={T.sources}>
+          <span className="sources-label">{T.sources}</span>
           {listed.map((s) => (
             <Cite key={s.n} source={s} />
           ))}
@@ -204,7 +210,7 @@ function Reasoning({ text, thinking, ms }: { text: string; thinking: boolean; ms
     if (thinking && body.current) body.current.scrollTop = body.current.scrollHeight;
   }, [text, thinking]);
 
-  const label = thinking ? "Pensando" : ms ? `Pensou por ${Math.max(1, Math.round(ms / 1000))} s` : "Raciocínio";
+  const label = thinking ? T.thinking : ms ? T.thought(Math.max(1, Math.round(ms / 1000))) : T.reasoning;
   return (
     <details className={`reasoning${thinking ? " is-live" : ""}`} open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>

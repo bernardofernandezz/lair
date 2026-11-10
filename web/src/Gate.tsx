@@ -1,4 +1,10 @@
 import { useState } from "react";
+import { pick } from "./i18n";
+
+const T = pick({
+  en: { ask: "This server needs an access token.", enter: "Sign in", hint1: "It's the value given in ", hint2: " or ", hint3: " when the server started." },
+  pt: { ask: "Este servidor pede um token de acesso.", enter: "Entrar", hint1: "É o valor passado em ", hint2: " ou ", hint3: " ao iniciar o servidor." },
+});
 
 type Props = { error?: string; attempt: number; onSubmit: (token: string) => Promise<void> };
 
@@ -16,7 +22,7 @@ export function Gate({ error, attempt, onSubmit }: Props) {
         setBusy(false);
       }}
     >
-      <label htmlFor="token">Este servidor pede um token de acesso.</label>
+      <label htmlFor="token">{T.ask}</label>
       <div className="field">
         <input
           id="token"
@@ -29,7 +35,7 @@ export function Gate({ error, attempt, onSubmit }: Props) {
           aria-describedby={error ? "token-error" : undefined}
         />
         <button className="solid" disabled={!token || busy}>
-          Entrar
+          {T.enter}
         </button>
       </div>
       {error && (
@@ -38,7 +44,11 @@ export function Gate({ error, attempt, onSubmit }: Props) {
         </p>
       )}
       <p className="hint">
-        É o valor passado em <code>--token</code> ou <code>LAIR_TOKEN</code> ao iniciar o servidor.
+        {T.hint1}
+        <code>--token</code>
+        {T.hint2}
+        <code>LAIR_TOKEN</code>
+        {T.hint3}
       </p>
     </form>
   );

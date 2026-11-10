@@ -45,7 +45,7 @@ lair list             # see what you have
 lair update           # switch to the latest release
 ```
 
-Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. The easiest way to get more is **Configurações → Modelos** in the web UI: it suggests models that fit your GPU or RAM, searches Hugging Face, and downloads them without a restart. From the terminal, `lair pull` takes a file's download link:
+Models live in `~/.local/share/lair/models`. Drop any `.gguf` file in there, or point lair somewhere else with `-m <folder>`. The easiest way to get more is **Settings → Models** in the web UI: it suggests models that fit your GPU or RAM, searches Hugging Face, and downloads them without a restart. From the terminal, `lair pull` takes a file's download link:
 
 ```bash
 lair pull https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
@@ -74,7 +74,7 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
 
 ### Agent mode
 
-Switch on **Agente** in the composer and the model can act instead of only writing. It calls a tool, lair runs it and hands back the result, up to 8 steps per reply. Each step shows up in the chat as a card.
+Switch on **Agent** in the composer and the model can act instead of only writing. It calls a tool, lair runs it and hands back the result, up to 8 steps per reply. Each step shows up in the chat as a card.
 
 | Tool | What it does | Asks first |
 | --- | --- | :---: |
@@ -99,9 +99,9 @@ For models that write a `<think>` block before answering:
 
 | In the UI | `reasoning_effort` | What happens |
 | --- | --- | --- |
-| Desligado | `none` | Answers straight away |
-| Leve | `low` | Thinks for up to ~512 tokens, then answers |
-| Profundo | `high` (default) | Thinks as long as it needs |
+| Off | `none` | Answers straight away |
+| Light | `low` | Thinks for up to ~512 tokens, then answers |
+| Deep | `high` (default) | Thinks as long as it needs |
 
 The API returns the thinking in `reasoning_content` and the answer in `content`, both in full responses and in streamed deltas.
 
@@ -114,11 +114,11 @@ Chats are stored on the server, so they follow you to any device that opens lair
 A skill is a folder with two files. It runs when one of its `when` phrases shows up as a whole word in your message (case and accents don't matter), and at most one runs per reply.
 
 ```
-pirate/skill.json   { "name": "Pirata", "description": "Fala como um pirata.", "when": ["pirata", "arr"] }
-pirate/prompt.md    Responda como um pirata do século XVIII.
+pirate/skill.json   { "name": "Pirate", "description": "Talks like a pirate.", "when": ["pirate", "arr"] }
+pirate/prompt.md    Answer like an 18th-century pirate.
 ```
 
-Manage them in the **Skills** panel at the bottom of the sidebar. You can install one from a `.zip`, a GitHub folder (`github.com/owner/repo/tree/branch/folder`) or any URL that serves those two files, and only those two files are ever read from a download. lair ships with one, **Cenas 3D**, which answers "3D" requests with an interactive three.js scene.
+Manage them in the **Skills** panel at the bottom of the sidebar. You can install one from a `.zip`, a GitHub folder (`github.com/owner/repo/tree/branch/folder`) or any URL that serves those two files, and only those two files are ever read from a download. lair ships with one, **3D scenes**, which answers "3D" requests with an interactive three.js scene.
 
 Skills are prompt text, and a malicious one could try to steer the agent. Install them only from sources you trust.
 

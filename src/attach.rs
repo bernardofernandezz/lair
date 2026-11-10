@@ -61,10 +61,10 @@ fn accepted(name: &str) -> bool {
 /// Stores an upload in the workspace and returns its id: `"<random>-<safe name>"`, a plain file name.
 pub fn save(workspace: &Path, name: &str, data: &[u8]) -> Result<String> {
     if !accepted(name) {
-        bail!("tipo de anexo não suportado: .{}", ext(name));
+        bail!("unsupported attachment type: .{}", ext(name));
     }
     if data.len() > MAX_UPLOAD {
-        bail!("o arquivo passa de {} MB", MAX_UPLOAD / (1024 * 1024));
+        bail!("the file is over {} MB", MAX_UPLOAD / (1024 * 1024));
     }
     let id = new_id(name);
     let dir = workspace.join(DIR);
@@ -76,10 +76,10 @@ pub fn save(workspace: &Path, name: &str, data: &[u8]) -> Result<String> {
 /// The stored file with that id; refused when the id is not a plain, accepted file name.
 pub fn path(workspace: &Path, id: &str) -> Result<PathBuf> {
     if !accepted(id) || id.contains(['/', '\\']) || id.starts_with('.') {
-        bail!("id de anexo inválido: {id}");
+        bail!("invalid attachment id: {id}");
     }
     let path = workspace.join(DIR).join(id);
-    std::fs::metadata(&path).with_context(|| format!("o anexo {id} não foi encontrado"))?;
+    std::fs::metadata(&path).with_context(|| format!("attachment {id} was not found"))?;
     Ok(path)
 }
 
@@ -92,7 +92,7 @@ pub fn load(workspace: &Path, id: &str, name: &str) -> Result<Loaded> {
         let data = std::fs::read(&file)?;
         Content::Text(pdf_extract::extract_text_from_mem(&data).context("extraindo texto do pdf")?)
     } else {
-        Content::Text(std::fs::read_to_string(&file).with_context(|| format!("{name} não é um arquivo de texto"))?)
+        Content::Text(std::fs::read_to_string(&file).with_context(|| format!("{name} is not a text file"))?)
     };
     let chars = match &content {
         Content::Text(t) => t.chars().count(),
@@ -129,15 +129,17 @@ pub fn sections(docs: &[(&Attachment, &str)]) -> String {
         let (name, path) = (attr(&a.name), attr(&format!("{DIR}/{}", a.id)));
         let text: String = text.trim().chars().take(INLINE_CHARS).collect();
         if text.is_empty() {
-            out.push_str(&format!("<anexo nome=\"{name}\" caminho=\"{path}\" texto=\"vazio\">\n</anexo>\n\n"));
+            out.push_str(&format!("<attachment name=\"{name}\" path=\"{path}\" text=\"empty\">\n</attachment>\n\n"));
         } else {
             out.push_str(&format!(
-                "<anexo nome=\"{name}\" caminho=\"{path}\" caracteres=\"{}\">\n{text}\n</anexo>\n\n",
+                "<attachment name=\"{name}\" path=\"{path}\" chars=\"{}\">\n{text}\n</attachment>\n\n",
                 a.chars
             ));
         }
     }
-    out.push_str("Documento(s) anexado(s): use-os para responder. O agente também pode abrir os arquivos originais no workspace.\n\n");
+    out.push_str(
+        "Attached document(s): use them to answer. The agent can also open the original files in the workspace.\n\n",
+    );
     out
 }
 
@@ -186,8 +188,8 @@ mod tests {
         let a = Attachment { id: "1-vazio.pdf".into(), name: "vazio.pdf".into(), chars: 0, image: false };
         let b = Attachment { id: "2-n.md".into(), name: "stra\"nge.md".into(), chars: 11, image: false };
         let s = sections(&[(&a, "   "), (&b, "duas coisas")]);
-        assert!(s.contains("texto=\"vazio\""), "an empty document is still announced");
-        assert!(s.contains("caminho=\"anexos/2-n.md\"") && s.contains("duas coisas"));
+        assert!(s.contains("text=\"empty\""), "an empty document is still announced");
+        assert!(s.contains("path=\"anexos/2-n.md\"") && s.contains("duas coisas"));
         assert!(s.contains("stra''nge"), "{s}");
     }
 }

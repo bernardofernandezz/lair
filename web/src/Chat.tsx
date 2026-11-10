@@ -6,6 +6,28 @@ import { pulse, settle, typed, type OrbSignal } from "./Orb";
 import { load, save } from "./storage";
 import { Turns } from "./Turns";
 import { addCall, addText, emptyReply, fromStored, setResult, snapshot, type Turn } from "./parts";
+import { pick } from "./i18n";
+
+const T = pick({
+  en: {
+    failed: "Couldn't answer: ",
+    lost: "Lost the connection to lair. What was generated is saved; waiting for the server to come back…",
+    gone: "lair stopped answering. Check that the server is running and reload the page.",
+    newChat: "New chat",
+    hello: "Pick a model and ask anything. It all runs on this machine.",
+    agentHint: "Lets the model use tools: workspace files, the shell, the web and your chats. Anything that changes something asks you first.",
+    agent: "Agent",
+  },
+  pt: {
+    failed: "Não foi possível responder: ",
+    lost: "A conexão com o lair caiu. O que já foi gerado está salvo; esperando o servidor voltar…",
+    gone: "O lair não voltou a responder. Confira se o servidor está rodando e recarregue a página.",
+    newChat: "Nova conversa",
+    hello: "Escolha um modelo e pergunte qualquer coisa. Tudo roda nesta máquina.",
+    agentHint: "Deixa o modelo usar ferramentas: arquivos do workspace, shell, web e suas conversas. Ações que mudam algo pedem sua aprovação.",
+    agent: "Agente",
+  },
+});
 
 type Props = {
   api: Api;
@@ -144,7 +166,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
       // The server already saved the question, so it stays on screen; only an empty reply is dropped.
       if (reply.parts.length === 0 && !reply.reasoning) setTurns(before);
       if (e instanceof ConnectionLost) recover();
-      else if (!ctl.signal.aborted) setError(`Não foi possível responder: ${(e as Error).message}`);
+      else if (!ctl.signal.aborted) setError(T.failed + (e as Error).message);
     } finally {
       settle(signal.current);
       setBusy(false);
@@ -156,7 +178,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
 
   /** Waits for the server to answer again, then shows the conversation as it was saved. */
   async function recover() {
-    setError("A conexão com o lair caiu. O que já foi gerado está salvo; esperando o servidor voltar…");
+    setError(T.lost);
     for (let tries = 0; alive.current && tries < 90; tries++) {
       try {
         setModels(await api.models());
@@ -170,14 +192,14 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    if (alive.current) setError("O lair não voltou a responder. Confira se o servidor está rodando e recarregue a página.");
+    if (alive.current) setError(T.gone);
   }
 
   return (
     <main className={`chat${active ? "" : " is-empty"}`}>
       {active && (
         <button className="ghost actions" onClick={onNew}>
-          Nova conversa
+          {T.newChat}
         </button>
       )}
 
@@ -209,7 +231,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
         conversations={conversations}
         current={conv.current}
         busy={busy}
-        hello={!active && "Escolha um modelo e pergunte qualquer coisa. Tudo roda nesta máquina."}
+        hello={!active && T.hello}
         onSend={send}
         vision={!!current.vision}
         fileTypes={fileTypes}
@@ -221,13 +243,13 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
               type="button"
               className={`chip agent-toggle${agent ? " is-on" : ""}`}
               aria-pressed={agent}
-              title="Deixa o modelo usar ferramentas: arquivos do workspace, shell, web e suas conversas. Ações que mudam algo pedem sua aprovação."
+              title={T.agentHint}
               onClick={() => setAgent((a) => !a)}
             >
               <svg viewBox="0 0 24 24" aria-hidden>
                 <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" />
               </svg>
-              <span>Agente</span>
+              <span>{T.agent}</span>
             </button>
             <span className="tools-gap" />
             <ContextMeter used={tokens} size={current.ctx ?? 0} />
