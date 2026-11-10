@@ -65,29 +65,29 @@ impl Config {
         let url = |v: Option<String>, what: &str| -> Result<Option<String>> {
             let v = text(v);
             if v.as_deref().is_some_and(|u| !(u.starts_with("http://") || u.starts_with("https://"))) {
-                bail!("{what} deve começar com http:// ou https://");
+                bail!("{what} must start with http:// or https://");
             }
             Ok(v)
         };
         let name = text(self.name);
         if name.as_deref().is_some_and(|n| n.len() > 64) {
-            bail!("o nome do nó passa de 64 caracteres");
+            bail!("the node name is over 64 characters");
         }
         let peers: Vec<String> = self.peers.iter().map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect();
         for p in &peers {
             if p.contains(['/', ' ']) || p.starts_with("http") {
-                bail!("\"{p}\" não parece um endereço: use host:porta (ex.: 10.1.2.3:8080)");
+                bail!("\"{p}\" does not look like an address: use host:port (e.g. 10.1.2.3:8080)");
             }
             if p.split(':').nth(1).is_some_and(|port| port.parse::<u16>().is_err()) {
-                bail!("a porta de \"{p}\" não é um número de 1 a 65535");
+                bail!("the port in \"{p}\" is not a number from 1 to 65535");
             }
         }
         if peers.len() > 64 {
-            bail!("no máximo 64 peers");
+            bail!("at most 64 peers");
         }
         Ok(Config {
             searxng: url(self.searxng, "a URL do SearXNG")?,
-            skills_index: url(self.skills_index, "o índice de skills")?,
+            skills_index: url(self.skills_index, "the skills index")?,
             name,
             peers,
             reasoning: self.reasoning,

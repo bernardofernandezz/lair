@@ -1,13 +1,49 @@
 import { useEffect, useRef, useState, type CSSProperties, type FocusEvent, type KeyboardEvent } from "react";
 import { modelName, type Effort, type ModelInfo } from "./api";
+import { pick } from "./i18n";
+
+const T = pick({
+  en: {
+    modes: [
+      { value: "none" as Effort, label: "Off", hint: "Answers right away, no thinking" },
+      { value: "low" as Effort, label: "Light", hint: "Thinks a little before answering" },
+      { value: "high" as Effort, label: "Deep", hint: "Thinks as long as it needs" },
+    ],
+    model: "Model",
+    reasoningOf: (m: string) => `, reasoning ${m}`,
+    modelAndReasoning: "Model and reasoning",
+    on: (n: string) => `On ${n}`,
+    here: "This machine",
+    thinks: "Thinks",
+    vision: "Vision",
+    loaded: "In memory",
+    reasoning: "Reasoning",
+    more: "Get more models…",
+    used: (u: string, s: string) => `${u} of ${s} context tokens used`,
+  },
+  pt: {
+    modes: [
+      { value: "none" as Effort, label: "Desligado", hint: "Responde direto, sem pensar" },
+      { value: "low" as Effort, label: "Leve", hint: "Pensa um pouco antes de responder" },
+      { value: "high" as Effort, label: "Profundo", hint: "Pensa o quanto precisar" },
+    ],
+    model: "Modelo",
+    reasoningOf: (m: string) => `, raciocínio ${m}`,
+    modelAndReasoning: "Modelo e raciocínio",
+    on: (n: string) => `Em ${n}`,
+    here: "Esta máquina",
+    thinks: "Pensa",
+    vision: "Visão",
+    loaded: "Na memória",
+    reasoning: "Raciocínio",
+    more: "Baixar mais modelos…",
+    used: (u: string, s: string) => `${u} de ${s} tokens de contexto usados`,
+  },
+});
 
 export const isEffort = (v: string): v is Effort => MODES.some((m) => m.value === v);
 
-export const MODES: { value: Effort; label: string; hint: string }[] = [
-  { value: "none", label: "Desligado", hint: "Responde direto, sem pensar" },
-  { value: "low", label: "Leve", hint: "Pensa um pouco antes de responder" },
-  { value: "high", label: "Profundo", hint: "Pensa o quanto precisar" },
-];
+export const MODES: { value: Effort; label: string; hint: string }[] = T.modes;
 
 // shortcut: read from the file name; read general.file_type from the GGUF if names outside the pattern show up.
 const QUANT = /(?:^|[-_.])(I?Q\d(?:_[KS0-9])?(?:_[A-Z0-9]+)?|BF16|F16|F32)(?=$|[-_.])/i;
@@ -106,7 +142,7 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
         className="chip model-chip"
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`Modelo: ${name}${current?.thinks && mode ? `, raciocínio ${mode.label}` : ""}`}
+        aria-label={`${T.model}: ${name}${current?.thinks && mode ? T.reasoningOf(mode.label) : ""}`}
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
       >
@@ -117,12 +153,12 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
         </svg>
       </button>
       {open && (
-        <div className="picker-panel" role="dialog" aria-label="Modelo e raciocínio">
-          <ul ref={list} role="listbox" tabIndex={0} aria-label="Modelo" aria-activedescendant={`model-${hi}`} onKeyDown={onKey}>
+        <div className="picker-panel" role="dialog" aria-label={T.modelAndReasoning}>
+          <ul ref={list} role="listbox" tabIndex={0} aria-label={T.model} aria-activedescendant={`model-${hi}`} onKeyDown={onKey}>
             {groups.map(([node, ms]) => [
               groups.length > 1 && (
                 <li key={`h-${node}`} role="presentation" className="group-head">
-                  {node ? `Em ${node}` : "Esta máquina"}
+                  {node ? T.on(node) : T.here}
                 </li>
               ),
               ...ms.map((m) => {
@@ -142,9 +178,9 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
                     <span className="option-meta">
                       {quant && <span className="tag">{quant}</span>}
                       {m.size ? <span className="tag">{gb(m.size)}</span> : null}
-                      {m.thinks && <span className="tag">Pensa</span>}
-                      {m.vision && <span className="tag">Visão</span>}
-                      {m.loaded && <span className="tag is-on">Na memória</span>}
+                      {m.thinks && <span className="tag">{T.thinks}</span>}
+                      {m.vision && <span className="tag">{T.vision}</span>}
+                      {m.loaded && <span className="tag is-on">{T.loaded}</span>}
                     </span>
                   </li>
                 );
@@ -154,7 +190,7 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
           {current?.thinks && (
             <div className="picker-section">
               <span className="picker-label" id="reasoning-label">
-                Raciocínio
+                {T.reasoning}
               </span>
               <ReasoningControl value={effort} onChange={onEffort} />
               <span className="picker-hint">{mode?.hint}</span>
@@ -169,7 +205,7 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
                 onMore();
               }}
             >
-              Baixar mais modelos…
+              {T.more}
             </button>
           )}
         </div>
@@ -196,7 +232,7 @@ export function ContextMeter({ used, size }: { used: number; size: number }) {
   if (!used || !size) return null;
   const share = Math.min(1, used / size);
   const k = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0).replace(".", ",")}k`);
-  const label = `${k(used)} de ${k(size)} tokens de contexto usados`;
+  const label = T.used(k(used), k(size));
   return (
     <span className={`context-meter${share > 0.8 ? " is-full" : ""}`} role="img" aria-label={label} title={label}>
       <svg viewBox="0 0 20 20" aria-hidden>

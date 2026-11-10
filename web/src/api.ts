@@ -1,3 +1,9 @@
+import { pick } from "./i18n";
+
+const T = pick({
+  en: { badToken: "That token doesn't open this server.", lost: "the connection dropped" },
+  pt: { badToken: "Esse token não abre este servidor.", lost: "a conexão caiu" },
+});
 /** `node` is the peer machine the model runs on; absent for this one. */
 /** `size` is the file's bytes and `ctx` the context it runs with; both 0 from older peers. */
 export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean; size?: number; ctx?: number };
@@ -120,7 +126,7 @@ export class AuthError extends Error {}
 export class ConnectionLost extends Error {}
 
 async function check(r: Response): Promise<Response> {
-  if (r.status === 401) throw new AuthError("Esse token não abre este servidor.");
+  if (r.status === 401) throw new AuthError(T.badToken);
   if (!r.ok) {
     const body = await r.json().catch(() => null);
     throw new Error(body?.error?.message ?? `O servidor respondeu ${r.status}.`);
@@ -225,7 +231,7 @@ export function client(token: string) {
     ): Promise<void> {
       // fetch and read reject with a TypeError when the connection itself fails; an abort is the caller's own doing.
       const lost = (e: unknown) => {
-        throw e instanceof TypeError && !signal.aborted ? new ConnectionLost("a conexão caiu") : e;
+        throw e instanceof TypeError && !signal.aborted ? new ConnectionLost(T.lost) : e;
       };
       const r = await check(await fetch(`${conv(id)}/messages`, { method: "POST", headers: json, body: JSON.stringify(input), signal }).catch(lost));
       const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();

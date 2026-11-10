@@ -57,10 +57,10 @@ enum Cmd {
         #[arg(long)]
         system: Option<String>,
     },
-    /// Download a .gguf model into the models folder
+    /// Download a model: a Hugging Face repo (`Qwen/Qwen3-8B-GGUF`, `...:Q5_K_M`, or a name to search) or a .gguf URL
     Pull {
-        /// URL of the .gguf file, e.g. https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf
-        url: String,
+        /// `owner/repo`, `owner/repo:QUANT`, a repo name to search for, or the URL of a .gguf file
+        model: String,
         /// Folder to save it in (default: ~/.local/share/lair/models)
         #[arg(short = 'm', long = "models")]
         models: Option<PathBuf>,
@@ -247,6 +247,21 @@ async fn download(url: &str, dir: &std::path::Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// `lair pull`: a URL downloads as is; anything else names a Hugging Face repo, and the file that fits
+/// this machine best (or the quant asked for) comes down with its vision projector, if it has one.
+async fn pull(spec: &str, models: &std::path::Path) -> Result<()> {
+    if spec.starts_with("http://") || spec.starts_with("https://") {
+        return download(spec, models).await.map(drop);
+    }
+    let (repo, dir, files) = hub::plan(&net::client(), spec, models).await?;
+    eprintln!("using {repo}");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    for name in &files {
+        download(&hub::file_url(&repo, name), &dir).await?;
+    }
+    Ok(())
+}
+
 fn default_data_dir() -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_DATA_HOME") {
         Some(d) => PathBuf::from(d),
@@ -275,7 +290,7 @@ async fn main() -> Result<()> {
             tokio::task::block_in_place(|| chat::run(&mut engine, &id, params, system))
         }
         Cmd::Update => update::run().await,
-        Cmd::Pull { url, models } => download(&url, &models_dir(models)?).await.map(drop),
+        Cmd::Pull { model, models } => pull(&model, &models_dir(models)?).await,
         Cmd::List { models } => {
             let dir = models_dir(models)?;
             let mut found = Vec::new();
@@ -287,7 +302,7 @@ async fn main() -> Result<()> {
             }
             if found.is_empty() {
                 eprintln!(
-                    "no models in {}; `lair pull <url>` downloads one, or `lair serve` fetches a default",
+                    "no models in {}; `lair pull <repo>` downloads one, or `lair serve` fetches a default",
                     dir.display()
                 );
             }

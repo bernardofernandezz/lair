@@ -7,6 +7,12 @@ import { Gate } from "./Gate";
 import { newSignal, Orb, type OrbSignal } from "./Orb";
 import { watchFavicon } from "./favicon";
 import { load, save } from "./storage";
+import { pick } from "./i18n";
+
+const T = pick({
+  en: { offline: "The lair server didn't answer. Check that it's running.", retry: "Try again" },
+  pt: { offline: "O servidor lair não respondeu. Confira se ele está rodando.", retry: "Tentar de novo" },
+});
 
 type Phase =
   | { kind: "connecting" }
@@ -61,9 +67,9 @@ export function App() {
       {phase.kind === "gate" && <Gate error={phase.error} attempt={phase.attempt} onSubmit={connect} />}
       {phase.kind === "offline" && (
         <div className="center notice" role="alert">
-          <p>O servidor lair não respondeu. Confira se ele está rodando.</p>
+          <p>{T.offline}</p>
           <button className="ghost" onClick={() => connect(load("token"))}>
-            Tentar de novo
+            {T.retry}
           </button>
         </div>
       )}

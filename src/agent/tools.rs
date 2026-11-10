@@ -52,97 +52,97 @@ pub const SPECS: &[Spec] = &[
     Spec {
         tool: Tool::ListDir,
         name: "list_dir",
-        label: "Listar pasta",
+        label: "List folder",
         subject: "path",
-        usage: r#"lista uma pasta do workspace. {"path": "."}"#,
+        usage: r#"lists a folder in the workspace. {"path": "."}"#,
         needs_approval: false,
     },
     Spec {
         tool: Tool::ReadFile,
         name: "read_file",
-        label: "Ler arquivo",
+        label: "Read file",
         subject: "path",
-        usage: r#"lê um arquivo de texto do workspace. {"path": "notas.md"}"#,
+        usage: r#"reads a text file from the workspace. {"path": "notes.md"}"#,
         needs_approval: false,
     },
     Spec {
         tool: Tool::WriteFile,
         name: "write_file",
-        label: "Escrever arquivo",
+        label: "Write file",
         subject: "path",
-        usage: r#"cria ou substitui um arquivo do workspace. {"path": "notas.md", "content": "..."}"#,
+        usage: r#"creates or replaces a file in the workspace. {"path": "notes.md", "content": "..."}"#,
         needs_approval: true,
     },
     Spec {
         tool: Tool::EditFile,
         name: "edit_file",
-        label: "Editar arquivo",
+        label: "Edit file",
         subject: "path",
-        usage: r#"troca um trecho exato de um arquivo. {"path": "a.txt", "find": "texto atual", "replace": "texto novo"}"#,
+        usage: r#"replaces an exact piece of a file. {"path": "a.txt", "find": "current text", "replace": "new text"}"#,
         needs_approval: true,
     },
     Spec {
         tool: Tool::DeleteFile,
         name: "delete_file",
-        label: "Apagar arquivo",
+        label: "Delete file",
         subject: "path",
-        usage: r#"apaga um arquivo do workspace. {"path": "velho.txt"}"#,
+        usage: r#"deletes a file from the workspace. {"path": "old.txt"}"#,
         needs_approval: true,
     },
     Spec {
         tool: Tool::RunCommand,
         name: "run_command",
-        label: "Rodar comando",
+        label: "Run command",
         subject: "command",
-        usage: r#"roda um comando de shell na pasta do workspace (60 s no máximo). {"command": "ls -la"}"#,
+        usage: r#"runs a shell command in the workspace folder (60 s at most). {"command": "ls -la"}"#,
         needs_approval: true,
     },
     Spec {
         tool: Tool::WebSearch,
         name: "web_search",
-        label: "Buscar na web",
+        label: "Search the web",
         subject: "query",
-        usage: r#"busca na web; cada resultado vem com um número n para citar. {"query": "..."}"#,
+        usage: r#"searches the web; each result comes with a number n to cite. {"query": "..."}"#,
         needs_approval: true,
     },
     Spec {
         tool: Tool::FetchUrl,
         name: "fetch_url",
-        label: "Abrir página",
+        label: "Open page",
         subject: "url",
-        usage: r#"baixa uma página e devolve o texto. {"url": "https://..."}"#,
+        usage: r#"downloads a page and returns its text. {"url": "https://..."}"#,
         needs_approval: true,
     },
     Spec {
         tool: Tool::SearchConversations,
         name: "search_conversations",
-        label: "Buscar conversas",
+        label: "Search chats",
         subject: "query",
-        usage: r#"procura nas conversas salvas do usuário. {"query": "..."}"#,
+        usage: r#"searches the user's saved chats. {"query": "..."}"#,
         needs_approval: false,
     },
     Spec {
         tool: Tool::ReadConversation,
         name: "read_conversation",
-        label: "Ler conversa",
+        label: "Read chat",
         subject: "id",
-        usage: r#"lê uma conversa salva pelo id. {"id": "..."}"#,
+        usage: r#"reads a saved chat by id. {"id": "..."}"#,
         needs_approval: false,
     },
     Spec {
         tool: Tool::ListSkills,
         name: "list_skills",
-        label: "Listar skills",
+        label: "List skills",
         subject: "",
-        usage: "lista as skills e seus gatilhos. {}",
+        usage: "lists the skills and their triggers. {}",
         needs_approval: false,
     },
     Spec {
         tool: Tool::SaveSkill,
         name: "save_skill",
-        label: "Salvar skill",
+        label: "Save skill",
         subject: "id",
-        usage: r#"cria ou substitui uma skill (instruções extras ativadas por palavras). {"id": "pirata", "name": "Pirata", "description": "...", "when": ["pirata"], "prompt": "Responda como um pirata."}"#,
+        usage: r#"creates or replaces a skill (extra instructions triggered by words). {"id": "pirate", "name": "Pirate", "description": "...", "when": ["pirate"], "prompt": "Answer like a pirate."}"#,
         needs_approval: true,
     },
 ];
@@ -151,19 +151,21 @@ pub fn spec(name: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|s| s.name == name)
 }
 
+/// How a model calls a tool; shared by agent mode and the chat API's `tools`.
+pub const PROTOCOL: &str = "# Tools\n\
+     You can act by using tools. To use one, write exactly\n\
+     <tool_call>{\"name\": \"NAME\", \"arguments\": {...}}</tool_call>\n\
+     and stop. The result arrives in a <tool_response> message. Use one tool at a time, \
+     only when needed. If you say you will do something, make the call right away, in the same \
+     reply; don't end the reply just announcing it. With the result in hand, answer the user \
+     normally, without <tool_call>, in the user's language.\n";
+
 /// The instructions that turn a chat model into an agent.
 pub fn system_prompt() -> String {
-    let mut out = String::from(
-        "# Ferramentas\n\
-         Você pode agir usando ferramentas. Para usar uma, escreva exatamente\n\
-         <tool_call>{\"name\": \"NOME\", \"arguments\": {...}}</tool_call>\n\
-         e pare. O resultado chega numa mensagem <tool_response>. Use uma ferramenta por vez, \
-         só quando precisar. Se disser que vai fazer algo, faça a chamada logo em seguida, na mesma \
-         resposta; não termine a resposta só anunciando. Com o resultado em mãos, responda ao usuário \
-         normalmente, sem <tool_call>.\n\
-         Caminhos são relativos à pasta de trabalho (workspace).\n\
-         Ao usar informação de uma busca na web, cite a fonte com o número dela entre colchetes logo \
-         depois do trecho, assim: [1]. Cite só números que a busca devolveu.\n\nFerramentas:\n",
+    let mut out = format!(
+        "{PROTOCOL}Paths are relative to the working folder (workspace).\n\
+         When you use information from a web search, cite the source with its number in brackets right \
+         after the passage, like this: [1]. Only cite numbers the search returned.\n\nTools:\n"
     );
     for s in SPECS {
         out.push_str(&format!("- {}: {}\n", s.name, s.usage));
@@ -219,19 +221,15 @@ pub async fn run(lair: &Lair, tool: Tool, args: &Value, sources: &mut usize) -> 
                 source: None,
             };
             lair.skills.write().unwrap().save(id, &manifest, req(args, "prompt")?)?;
-            Ok(format!("skill {id} salva; ela roda quando a mensagem do usuário tiver um dos gatilhos"))
+            Ok(format!("skill {id} saved; it runs when the user's message has one of its triggers"))
         }
         Tool::SearchConversations => {
             let hits = lair.store.search(req(args, "query")?)?;
-            Ok(if hits.is_empty() {
-                "nenhuma conversa encontrada".into()
-            } else {
-                serde_json::to_string_pretty(&hits)?
-            })
+            Ok(if hits.is_empty() { "no chats found".into() } else { serde_json::to_string_pretty(&hits)? })
         }
         Tool::ReadConversation => {
             let id = req(args, "id")?;
-            let c = lair.store.get(id)?.with_context(|| format!("conversa {id} não existe"))?;
+            let c = lair.store.get(id)?.with_context(|| format!("chat {id} does not exist"))?;
             Ok(format!("# {}\n{}", c.title, lair.store.transcript(id)?))
         }
     }?;
@@ -248,12 +246,12 @@ fn list_dir(ws: &Path, path: &str) -> Result<String> {
         })
         .collect();
     names.sort();
-    Ok(if names.is_empty() { "(pasta vazia)".into() } else { names.join("\n") })
+    Ok(if names.is_empty() { "(empty folder)".into() } else { names.join("\n") })
 }
 
 fn read_file(ws: &Path, path: &str) -> Result<String> {
     let bytes = std::fs::read(jail::existing(ws, path)?)?;
-    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{path} não é um arquivo de texto"))
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{path} is not a text file"))
 }
 
 fn write_file(ws: &Path, path: &str, content: &str) -> Result<String> {
@@ -269,12 +267,12 @@ fn edit_file(ws: &Path, path: &str, find: &str, replace: &str) -> Result<String>
     let target = jail::existing(ws, path)?;
     let text = std::fs::read_to_string(&target)?;
     match text.matches(find).count() {
-        0 => bail!("o trecho não aparece em {path}"),
+        0 => bail!("the text does not appear in {path}"),
         1 => {
             std::fs::write(&target, text.replacen(find, replace, 1))?;
             Ok(format!("{path} editado"))
         }
-        n => bail!("o trecho aparece {n} vezes em {path}; inclua mais contexto para ser único"),
+        n => bail!("the text appears {n} times in {path}; include more context so it is unique"),
     }
 }
 
@@ -296,7 +294,7 @@ async fn run_command(ws: &Path, command: &str) -> Result<String> {
     if !err.trim().is_empty() {
         text.push_str(&format!("\n[stderr]\n{err}"));
     }
-    Ok(format!("[código de saída {}]\n{}", out.status.code().unwrap_or(-1), text.trim_end()))
+    Ok(format!("[exit code {}]\n{}", out.status.code().unwrap_or(-1), text.trim_end()))
 }
 
 async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str, sources: &mut usize) -> Result<String> {
@@ -311,7 +309,7 @@ async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str, 
         #[serde(default)]
         content: String,
     }
-    let base = searxng.context("busca na web não configurada: defina o SearXNG nas configurações")?;
+    let base = searxng.context("web search is not set up: set SearXNG in the settings")?;
     let r: Results = http
         .get(format!("{}/search", base.trim_end_matches('/')))
         .query(&[("q", query), ("format", "json")])
@@ -329,7 +327,7 @@ async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str, 
             json!({ "n": *sources, "title": h.title, "url": h.url, "snippet": h.content })
         })
         .collect();
-    Ok(if hits.is_empty() { "nenhum resultado".into() } else { serde_json::to_string_pretty(&hits)? })
+    Ok(if hits.is_empty() { "no results".into() } else { serde_json::to_string_pretty(&hits)? })
 }
 
 /// The page's `<title>`, so the UI and the model know what was read.
@@ -346,7 +344,7 @@ fn html_title(html: &[u8]) -> Option<String> {
 
 async fn fetch_url(http: &reqwest::Client, url: &str) -> Result<String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        bail!("só URLs http(s)");
+        bail!("only http(s) URLs");
     }
     // A cut page still reads well enough; the model only sees the first few thousand characters anyway.
     let (headers, body, _) = crate::net::get_capped(http, url, FETCH_LIMIT).await?;
@@ -354,7 +352,7 @@ async fn fetch_url(http: &reqwest::Client, url: &str) -> Result<String> {
     Ok(if html {
         let text = html2text::from_read(body.as_slice(), 100).unwrap_or_default();
         match html_title(&body) {
-            Some(title) => format!("Título: {title}\n\n{text}"),
+            Some(title) => format!("Title: {title}\n\n{text}"),
             None => text,
         }
     } else {
@@ -396,7 +394,7 @@ mod tests {
         write_file(&t, "docs/a.md", "um dois um").unwrap();
         assert_eq!(list_dir(&t, ".").unwrap(), "docs/");
         assert_eq!(read_file(&t, "docs/a.md").unwrap(), "um dois um");
-        assert!(edit_file(&t, "docs/a.md", "um", "três").unwrap_err().to_string().contains("2 vezes"));
+        assert!(edit_file(&t, "docs/a.md", "um", "três").unwrap_err().to_string().contains("2 times"));
         edit_file(&t, "docs/a.md", "dois", "2").unwrap();
         assert_eq!(read_file(&t, "docs/a.md").unwrap(), "um 2 um");
         assert!(write_file(&t, "../fora.md", "x").is_err());
@@ -417,7 +415,7 @@ mod tests {
     async fn commands_run_in_the_workspace_and_report_exit_code_and_stderr() {
         let t = workspace("cmd");
         let out = run_command(&t, "pwd; echo oops >&2; exit 3").await.unwrap();
-        assert!(out.starts_with("[código de saída 3]"));
+        assert!(out.starts_with("[exit code 3]"));
         assert!(out.contains(t.file_name().unwrap().to_str().unwrap()));
         assert!(out.contains("[stderr]\noops"));
     }

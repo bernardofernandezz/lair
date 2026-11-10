@@ -1,12 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Api, Download, Fit, Hardware, HubFile, HubRepo, Suggestion } from "../api";
 import { gb, quantOf } from "../Controls";
+import { pick } from "../i18n";
 
-const FIT: Record<Fit, { label: string; hint: string }> = {
-  fits: { label: "Cabe", hint: "Roda inteiro na GPU (ou na RAM, sem GPU)." },
-  tight: { label: "Apertado", hint: "Roda com parte das camadas na CPU: funciona, mais devagar." },
-  no: { label: "Não cabe", hint: "Maior que a memória desta máquina." },
-};
+const T = pick({
+  en: {
+    fit: {
+      fits: { label: "Fits", hint: "Runs fully on the GPU (or in RAM, without a GPU)." },
+      tight: { label: "Tight", hint: "Runs with some layers on the CPU: works, but slower." },
+      no: { label: "Doesn't fit", hint: "Bigger than this machine's memory." },
+    },
+    noGpu: "No GPU found", vram: " VRAM", ram: " RAM", reading: "Reading the hardware…",
+    ready: "Done: it's in the model list now.", of: (a: string, b: string) => `${a} of ${b}`, downloading: (f: string) => `Downloading ${f}`,
+    cancel: "Cancel", dismiss: "Dismiss", recommended: "Recommended", forThis: "Recommended for this machine",
+    asking: "Asking Hugging Face…", hfDown: "Couldn't reach Hugging Face right now.", best: "Best pick", noFit: "Doesn't fit",
+    search: "Search Hugging Face", searchPlaceholder: "E.g. qwen3, llama, mistral, gemma", searchLabel: "Search GGUF models on Hugging Face",
+    searchHint: "Only repos with .gguf files. Gated models and models split into parts don't show up.", nothing: "Nothing found.",
+    vision: "Vision", installed: "Installed", download: "Download", listing: "Listing files…", noFiles: "No single-file .gguf in this repo.",
+  },
+  pt: {
+    fit: {
+      fits: { label: "Cabe", hint: "Roda inteiro na GPU (ou na RAM, sem GPU)." },
+      tight: { label: "Apertado", hint: "Roda com parte das camadas na CPU: funciona, mais devagar." },
+      no: { label: "Não cabe", hint: "Maior que a memória desta máquina." },
+    },
+    noGpu: "Sem GPU detectada", vram: " de VRAM", ram: " de RAM", reading: "Lendo o hardware…",
+    ready: "Pronto: já aparece na lista de modelos.", of: (a: string, b: string) => `${a} de ${b}`, downloading: (f: string) => `Baixando ${f}`,
+    cancel: "Cancelar", dismiss: "Dispensar", recommended: "Recomendado", forThis: "Recomendados para esta máquina",
+    asking: "Consultando o Hugging Face…", hfDown: "Não foi possível falar com o Hugging Face agora.", best: "Melhor escolha", noFit: "Não cabe",
+    search: "Buscar no Hugging Face", searchPlaceholder: "Ex.: qwen3, llama, mistral, gemma", searchLabel: "Buscar modelos GGUF no Hugging Face",
+    searchHint: "Só repositórios com arquivos .gguf. Modelos com acesso restrito ou divididos em partes não aparecem.", nothing: "Nada encontrado.",
+    vision: "Visão", installed: "Instalado", download: "Baixar", listing: "Listando arquivos…", noFiles: "Nenhum .gguf de arquivo único neste repositório.",
+  },
+});
+
+const FIT: Record<Fit, { label: string; hint: string }> = T.fit;
 
 const active = (d: Download) => !d.finished && !d.error;
 
@@ -83,12 +111,12 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
       <p className="hw-line">
         {hw ? (
           <>
-            {hw.gpus.length ? hw.gpus.join(", ") : "Sem GPU detectada"}
-            {hw.vram > 0 && <span className="tag">{gb(hw.vram)} de VRAM</span>}
-            {hw.ram > 0 && <span className="tag">{gb(hw.ram)} de RAM</span>}
+            {hw.gpus.length ? hw.gpus.join(", ") : T.noGpu}
+            {hw.vram > 0 && <span className="tag">{gb(hw.vram) + T.vram}</span>}
+            {hw.ram > 0 && <span className="tag">{gb(hw.ram) + T.ram}</span>}
           </>
         ) : (
-          "Lendo o hardware…"
+          T.reading
         )}
       </p>
 
@@ -107,15 +135,15 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
                 <div className="skill-main">
                   <span className="skill-name">{d.file}</span>
                   <span className="skill-desc">
-                    {d.error ? d.error : d.finished ? "Pronto: já aparece na lista de modelos." : `${gb(d.done)} de ${gb(d.total)}`}
+                    {d.error ? d.error : d.finished ? T.ready : T.of(gb(d.done), gb(d.total))}
                   </span>
                   {active(d) && (
-                    <progress max={d.total || 1} value={d.done} aria-label={`Baixando ${d.file}`} />
+                    <progress max={d.total || 1} value={d.done} aria-label={T.downloading(d.file)} />
                   )}
                 </div>
                 <div className="skill-actions">
                   <button className="ghost" onClick={() => cancel(d.file)}>
-                    {active(d) ? "Cancelar" : "Dispensar"}
+                    {active(d) ? T.cancel : T.dismiss}
                   </button>
                 </div>
               </li>
@@ -124,17 +152,17 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
         </section>
       )}
 
-      <section aria-label="Recomendados">
-        <h3 className="models-head">Recomendados para esta máquina</h3>
-        {!suggested && <p className="hint">Consultando o Hugging Face…</p>}
-        {suggested?.length === 0 && <p className="hint">Não foi possível falar com o Hugging Face agora.</p>}
+      <section aria-label={T.recommended}>
+        <h3 className="models-head">{T.forThis}</h3>
+        {!suggested && <p className="hint">{T.asking}</p>}
+        {suggested?.length === 0 && <p className="hint">{T.hfDown}</p>}
         <ul className="skill-list">
           {suggested?.map((s) => (
             <li key={s.repo} className={s.best ? "is-best" : undefined}>
               <div className="skill-main">
                 <span className="skill-name">
                   {s.repo.split("/")[1].replace(/-GGUF$/i, "")}
-                  {s.best && <span className="badge is-live">Melhor escolha</span>}
+                  {s.best && <span className="badge is-live">{T.best}</span>}
                 </span>
                 <span className="skill-desc">{s.about}</span>
                 {s.pick && <FileTags file={s.pick} vision={s.vision} />}
@@ -143,7 +171,7 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
                 {s.pick ? (
                   <DownloadButton file={s.pick} running={running(s.pick.name)} onStart={() => start(s.repo, s.pick!.name)} />
                 ) : (
-                  <span className="hint">Não cabe</span>
+                  <span className="hint">{T.noFit}</span>
                 )}
               </div>
             </li>
@@ -151,19 +179,19 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
         </ul>
       </section>
 
-      <section aria-label="Buscar no Hugging Face">
-        <h3 className="models-head">Buscar no Hugging Face</h3>
+      <section aria-label={T.search}>
+        <h3 className="models-head">{T.search}</h3>
         <div className="field">
           <input
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ex.: qwen3, llama, mistral, gemma"
-            aria-label="Buscar modelos GGUF no Hugging Face"
+            placeholder={T.searchPlaceholder}
+            aria-label={T.searchLabel}
           />
         </div>
-        <p className="hint">Só repositórios com arquivos .gguf. Modelos com acesso restrito ou divididos em partes não aparecem.</p>
-        {repos?.length === 0 && <p className="hint">Nada encontrado.</p>}
+        <p className="hint">{T.searchHint}</p>
+        {repos?.length === 0 && <p className="hint">{T.nothing}</p>}
         {repos && repos.length > 0 && (
           <ul className="repo-list">
             {repos.map((r) => (
@@ -185,17 +213,17 @@ function FileTags({ file, vision }: { file: HubFile; vision?: boolean }) {
       <span className={`tag fit-${file.fit}`} title={FIT[file.fit].hint}>
         {FIT[file.fit].label}
       </span>
-      {vision && <span className="tag">Visão</span>}
+      {vision && <span className="tag">{T.vision}</span>}
     </span>
   );
 }
 
 function DownloadButton({ file, running, onStart }: { file: HubFile; running?: Download; onStart: () => void }) {
-  if (file.installed) return <span className="badge">Instalado</span>;
+  if (file.installed) return <span className="badge">{T.installed}</span>;
   if (running) return <span className="hint">{Math.round((running.done / (running.total || 1)) * 100)}%</span>;
   return (
     <button className={file.fit === "no" ? "ghost" : "solid"} onClick={onStart} title={FIT[file.fit].hint}>
-      Baixar
+      {T.download}
     </button>
   );
 }
@@ -229,20 +257,20 @@ function RepoRow({
     <li>
       <button className="repo-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         <span className="skill-name">{repo.id}</span>
-        <span className="skill-desc">{repo.downloads.toLocaleString("pt-BR")} downloads</span>
+        <span className="skill-desc">{repo.downloads.toLocaleString()} downloads</span>
       </button>
       {open && (
         <div className="repo-files">
           {error && <p className="error">{error}</p>}
-          {!files && !error && <p className="hint">Listando arquivos…</p>}
-          {files && models.length === 0 && <p className="hint">Nenhum .gguf de arquivo único neste repositório.</p>}
+          {!files && !error && <p className="hint">{T.listing}</p>}
+          {files && models.length === 0 && <p className="hint">{T.noFiles}</p>}
           <ul className="skill-list">
             {models.map((f) => (
               <li key={f.name}>
                 <div className="skill-main">
                   <span className="skill-name">
                     {f.name}
-                    {f.name === files?.pick && <span className="badge is-live">Recomendado</span>}
+                    {f.name === files?.pick && <span className="badge is-live">{T.recommended}</span>}
                   </span>
                   <FileTags file={f} vision={vision} />
                 </div>

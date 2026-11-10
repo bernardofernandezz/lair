@@ -37,6 +37,6 @@ export function loadAsset(id: string): Promise<THREE.Group> {
 
 function friendly(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  if (/draco|meshopt|ktx2/i.test(msg)) return "Este modelo usa compressão (Draco/meshopt/KTX2), não suportada.";
-  return msg || "falha ao carregar o modelo";
+  if (/draco|meshopt|ktx2/i.test(msg)) return "This model uses compression (Draco/meshopt/KTX2), which is not supported.";
+  return msg || "failed to load the model";
 }

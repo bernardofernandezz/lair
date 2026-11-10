@@ -1,5 +1,5 @@
 {
-  "name": "Cenas 3D",
-  "description": "Responde com uma cena 3D interativa no chat quando você pede algo em 3D.",
-  "when": ["3d", "3 d", "tres dimensoes"]
+  "name": "3D scenes",
+  "description": "Answers with an interactive 3D scene in the chat when you ask for something in 3D.",
+  "when": ["3d", "3 d", "three dimensions", "tres dimensoes"]
 }

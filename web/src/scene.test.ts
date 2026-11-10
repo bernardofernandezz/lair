@@ -103,7 +103,7 @@ test("repeat counts its copies toward the node limit", () => {
   const many = `{"nodes":[{"children":[${child},${child},${child}],"repeat":{"count":100}}]}`;
   const r = parseScene(many);
   expect(r.ok).toBe(false);
-  if (!r.ok) expect(r.error).toContain("repetições");
+  if (!r.ok) expect(r.error).toContain("repeats");
   const clamped = parseScene(`{"nodes":[{"geometry":{"kind":"box"},"repeat":{"count":0}}]}`);
   expect(clamped.ok && clamped.scene.nodes.length).toBe(1);
   expect(parseScene(`{"nodes":[{"geometry":{"kind":"box"},"repeat":{}}]}`).ok).toBe(false);

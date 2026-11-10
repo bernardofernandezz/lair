@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import type { Api, Conversation, Hit } from "../api";
 import { useSearch } from "./useSearch";
+import { pick } from "../i18n";
+
+const T = pick({
+  en: { close: "Close chats", open: "Open chats", chats: "Chats", newChat: "New chat", search: "Search chats", newTitle: "New title", untitled: "Untitled", confirmDelete: (t: string) => `Confirm deleting ${t}`, delete: (t: string) => `Delete ${t}`, deleteQ: "Delete?", none: (q: string) => `Nothing found for “${q}”.`, empty: "Your chats show up here.", settings: "Settings" },
+  pt: { close: "Fechar conversas", open: "Abrir conversas", chats: "Conversas", newChat: "Nova conversa", search: "Buscar conversas", newTitle: "Novo título", untitled: "Sem título", confirmDelete: (t: string) => `Confirmar exclusão de ${t}`, delete: (t: string) => `Excluir ${t}`, deleteQ: "Excluir?", none: (q: string) => `Nada encontrado para “${q}”.`, empty: "Suas conversas aparecem aqui.", settings: "Configurações" },
+});
 
 type Props = {
   api: Api;
@@ -37,16 +43,16 @@ export function Sidebar({ api, open, onToggle, conversations, current, onOpen, o
 
   return (
     <>
-      <button className="sidebar-toggle" aria-label={open ? "Fechar conversas" : "Abrir conversas"} aria-expanded={open} onClick={onToggle}>
+      <button className="sidebar-toggle" aria-label={open ? T.close : T.open} aria-expanded={open} onClick={onToggle}>
         <svg viewBox="0 0 24 24" aria-hidden>
           <path d="M4 6h16M4 12h10M4 18h16" />
         </svg>
       </button>
-      <aside className="sidebar" aria-label="Conversas" inert={!open}>
+      <aside className="sidebar" aria-label={T.chats} inert={!open}>
         <button className="ghost sidebar-new" onClick={() => onOpen(null)}>
-          Nova conversa
+          {T.newChat}
         </button>
-        <input className="sidebar-search" type="search" placeholder="Buscar conversas" aria-label="Buscar conversas" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input className="sidebar-search" type="search" placeholder={T.search} aria-label={T.search} value={q} onChange={(e) => setQ(e.target.value)} />
         <ul className="conv-list">
           {items.map((c) => (
             <li key={c.id} className={c.id === current ? "is-current" : undefined}>
@@ -55,7 +61,7 @@ export function Sidebar({ api, open, onToggle, conversations, current, onOpen, o
                   <input
                     name="title"
                     className="conv-rename"
-                    aria-label="Novo título"
+                    aria-label={T.newTitle}
                     defaultValue={c.title}
                     autoFocus
                     onBlur={(e) => rename(c.id, e.currentTarget.value)}
@@ -64,7 +70,7 @@ export function Sidebar({ api, open, onToggle, conversations, current, onOpen, o
                 </form>
               ) : (
                 <button className="conv" onClick={() => onOpen(c.id)} aria-current={c.id === current ? "page" : undefined}>
-                  <span className="conv-title">{c.title || "Sem título"}</span>
+                  <span className="conv-title">{c.title || T.untitled}</span>
                   {c.snippet && <span className="conv-snippet">{c.snippet}</span>}
                 </button>
               )}
@@ -76,11 +82,11 @@ export function Sidebar({ api, open, onToggle, conversations, current, onOpen, o
                 </button>
                 <button
                   className={confirming === c.id ? "is-confirming" : undefined}
-                  aria-label={confirming === c.id ? `Confirmar exclusão de ${c.title}` : `Excluir ${c.title}`}
+                  aria-label={confirming === c.id ? T.confirmDelete(c.title) : T.delete(c.title)}
                   onClick={() => remove(c.id)}
                 >
                   {confirming === c.id ? (
-                    "Excluir?"
+                    T.deleteQ
                   ) : (
                     <svg viewBox="0 0 24 24" aria-hidden>
                       <path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12" />
@@ -91,10 +97,10 @@ export function Sidebar({ api, open, onToggle, conversations, current, onOpen, o
             </li>
           ))}
         </ul>
-        {items.length === 0 && <p className="sidebar-empty">{q ? `Nada encontrado para “${q}”.` : "Suas conversas aparecem aqui."}</p>}
+        {items.length === 0 && <p className="sidebar-empty">{q ? T.none(q) : T.empty}</p>}
         <footer className="sidebar-foot">
           <button className="ghost" onClick={onSettings}>
-            Configurações
+            {T.settings}
           </button>
         </footer>
       </aside>

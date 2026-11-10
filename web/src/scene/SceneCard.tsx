@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as THREE from "three";
 import { parseScene } from "./schema";
 import { HELPER, SceneView } from "./Scene";
+import { pick } from "../i18n";
+
+const T = pick({
+  en: { scene: "3D scene", pause: "Pause", spin: "Spin", reset: "Reset", copied: "JSON copied.", copyFailed: "Couldn't copy.", copy: "Copy JSON", exportFailed: "Couldn't export: ", glb: "Download .glb", exit: "Exit", full: "Full screen", building: "Building the scene…", failed: "Couldn't build the scene: ", limit: (n: number) => `Limit of ${n} interactive scenes in this chat. This one stays as JSON; ask for a new scene to see it in 3D.`, unavailable: "Model unavailable — ", json: "View JSON" },
+  pt: { scene: "Cena 3D", pause: "Pausar", spin: "Girar", reset: "Reiniciar", copied: "JSON copiado.", copyFailed: "Não foi possível copiar.", copy: "Copiar JSON", exportFailed: "Não foi possível exportar: ", glb: "Baixar .glb", exit: "Sair", full: "Tela cheia", building: "Montando a cena…", failed: "Não foi possível montar a cena: ", limit: (n: number) => `Limite de ${n} cenas interativas nesta conversa. Esta ficou só como JSON; peça uma nova cena se quiser vê-la em 3D.`, unavailable: "Modelo indisponível — ", json: "Ver JSON" },
+});
 
 /** Saves the scene as a binary glTF, without the grid and shadow catcher. */
 async function downloadGlb(scene: THREE.Scene, title: string) {
@@ -56,7 +62,7 @@ export function SceneCard({ source, closed, render }: Props) {
     setAssetError(`${id}: ${message}`);
   }, []);
 
-  const title = (parsed.ok && parsed.scene.title) || "Cena 3D";
+  const title = (parsed.ok && parsed.scene.title) || T.scene;
   const pending = !closed && !parsed.ok;
 
   function toggleFullscreen() {
@@ -74,7 +80,7 @@ export function SceneCard({ source, closed, render }: Props) {
         <span className="scene-actions">
           {render && parsed.ok && (
             <button type="button" className="ghost" onClick={() => setManual(!spin)} aria-pressed={spin}>
-              {spin ? "Pausar" : "Girar"}
+              {spin ? T.pause : T.spin}
             </button>
           )}
           {render && parsed.ok && (
@@ -86,7 +92,7 @@ export function SceneCard({ source, closed, render }: Props) {
                 setManual(null);
               }}
             >
-              Reiniciar
+              {T.reset}
             </button>
           )}
           {parsed.ok && (
@@ -95,26 +101,26 @@ export function SceneCard({ source, closed, render }: Props) {
               className="ghost"
               onClick={() =>
                 navigator.clipboard.writeText(source.trim()).then(
-                  () => setNote("JSON copiado."),
-                  () => setNote("Não foi possível copiar."),
+                  () => setNote(T.copied),
+                  () => setNote(T.copyFailed),
                 )
               }
             >
-              Copiar JSON
+              {T.copy}
             </button>
           )}
           {render && parsed.ok && (
             <button
               type="button"
               className="ghost"
-              onClick={() => three.current && downloadGlb(three.current, title).catch((e) => setNote(`Não foi possível exportar: ${(e as Error).message}`))}
+              onClick={() => three.current && downloadGlb(three.current, title).catch((e) => setNote(T.exportFailed + (e as Error).message))}
             >
-              Baixar .glb
+              {T.glb}
             </button>
           )}
           {render && parsed.ok && (
             <button type="button" className="ghost" onClick={toggleFullscreen}>
-              {full ? "Sair" : "Tela cheia"}
+              {full ? T.exit : T.full}
             </button>
           )}
         </span>
@@ -123,20 +129,20 @@ export function SceneCard({ source, closed, render }: Props) {
       {pending && (
         <div className="scene-pending" role="status">
           <span className="scene-spinner" aria-hidden />
-          Montando a cena…
+          {T.building}
         </div>
       )}
 
       {!pending && !parsed.ok && (
         <p className="scene-error" role="alert">
-          Não foi possível montar a cena: {parsed.error}
+          {T.failed}
+          {parsed.error}
         </p>
       )}
 
       {parsed.ok && !render && (
         <p className="scene-note">
-          Limite de {MAX_CANVASES} cenas interativas nesta conversa. Esta ficou só como JSON; peça uma nova cena se
-          quiser vê-la em 3D.
+          {T.limit(MAX_CANVASES)}
         </p>
       )}
 
@@ -160,13 +166,14 @@ export function SceneCard({ source, closed, render }: Props) {
 
       {assetError && (
         <p className="scene-error" role="alert">
-          Modelo indisponível — {assetError}
+          {T.unavailable}
+          {assetError}
         </p>
       )}
 
       {parsed.ok && (
         <details className="scene-json">
-          <summary>Ver JSON</summary>
+          <summary>{T.json}</summary>
           <pre>{JSON.stringify(parsed.scene, null, 2)}</pre>
         </details>
       )}

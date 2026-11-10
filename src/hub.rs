@@ -14,15 +14,15 @@ const HF: &str = "https://huggingface.co";
 
 /// Open GGUF repos shown before any search, smallest first; the best fit among them is recommended.
 pub const SUGGESTED: &[(&str, &str)] = &[
-    ("bartowski/Llama-3.2-3B-Instruct-GGUF", "Pequeno e rápido; bom para máquinas modestas."),
-    ("Qwen/Qwen3-4B-GGUF", "Raciocina; o padrão do lair."),
-    ("ggml-org/gemma-3-4b-it-GGUF", "Enxerga imagens; leve."),
-    ("ggml-org/Qwen2.5-VL-7B-Instruct-GGUF", "Enxerga imagens; lê bem documentos e telas."),
-    ("Qwen/Qwen3-8B-GGUF", "Raciocina; bom equilíbrio para uso diário."),
-    ("ggml-org/gemma-3-12b-it-GGUF", "Enxerga imagens; respostas mais cuidadosas."),
-    ("Qwen/Qwen3-14B-GGUF", "Raciocina; mais capaz, pede uma GPU maior."),
-    ("Qwen/Qwen3-30B-A3B-GGUF", "Raciocina; grande, mas rápido (MoE)."),
-    ("Qwen/Qwen3-32B-GGUF", "Raciocina; o mais capaz da lista."),
+    ("bartowski/Llama-3.2-3B-Instruct-GGUF", "Small and fast; good for modest machines."),
+    ("Qwen/Qwen3-4B-GGUF", "Reasons; lair's default."),
+    ("ggml-org/gemma-3-4b-it-GGUF", "Sees images; light."),
+    ("ggml-org/Qwen2.5-VL-7B-Instruct-GGUF", "Sees images; reads documents and screens well."),
+    ("Qwen/Qwen3-8B-GGUF", "Reasons; a good balance for daily use."),
+    ("ggml-org/gemma-3-12b-it-GGUF", "Sees images; more careful answers."),
+    ("Qwen/Qwen3-14B-GGUF", "Reasons; more capable, needs a bigger GPU."),
+    ("Qwen/Qwen3-30B-A3B-GGUF", "Reasons; big but fast (MoE)."),
+    ("Qwen/Qwen3-32B-GGUF", "Reasons; the most capable on the list."),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -72,7 +72,7 @@ pub async fn search(http: &reqwest::Client, q: &str) -> Result<Vec<Repo>> {
         .error_for_status()?
         .json()
         .await
-        .context("resposta inesperada do Hugging Face")?;
+        .context("unexpected answer from Hugging Face")?;
     Ok(repos)
 }
 
@@ -92,9 +92,9 @@ pub async fn files(http: &reqwest::Client, repo: &str) -> Result<Vec<(String, u6
     check_repo(repo)?;
     let resp = http.get(format!("{HF}/api/models/{repo}/tree/main")).send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND || resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        bail!("repositório {repo} não encontrado ou com acesso restrito");
+        bail!("repo {repo} not found or gated");
     }
-    let entries: Vec<Entry> = resp.error_for_status()?.json().await.context("resposta inesperada do Hugging Face")?;
+    let entries: Vec<Entry> = resp.error_for_status()?.json().await.context("unexpected answer from Hugging Face")?;
     Ok(entries
         .into_iter()
         .filter(|e| e.path.ends_with(".gguf") && !e.path.contains('/') && !is_shard(&e.path))
@@ -123,7 +123,7 @@ pub fn check_repo(repo: &str) -> Result<()> {
     };
     match repo.split_once('/') {
         Some((owner, name)) if ok(owner) && ok(name) => Ok(()),
-        _ => bail!("\"{repo}\" não é um repositório do Hugging Face (dono/nome)"),
+        _ => bail!("\"{repo}\" is not a Hugging Face repo (owner/name)"),
     }
 }
 
@@ -218,6 +218,75 @@ pub async fn judged(lair: &Lair, repo: &str) -> Result<Vec<File>> {
         .collect())
 }
 
+/// `file`, plus the repo's smallest vision projector when it has one that isn't in `dir` yet.
+fn with_projector(listed: &[(String, u64)], file: &str, dir: &Path) -> Vec<String> {
+    let mut queue = vec![file.to_owned()];
+    if !file.to_ascii_lowercase().contains("mmproj")
+        && let Some((proj, _)) =
+            listed.iter().filter(|(n, _)| n.to_ascii_lowercase().contains("mmproj")).min_by_key(|(_, s)| *s)
+        && !dir.join(proj).exists()
+    {
+        queue.push(proj.clone());
+    }
+    queue
+}
+
+/// Where a repo's file downloads from.
+pub fn file_url(repo: &str, name: &str) -> String {
+    format!("{HF}/{repo}/resolve/main/{name}")
+}
+
+/// What `lair pull <spec>` downloads: `owner/repo`, `owner/repo:QUANT` or just `repo` (searched).
+/// Returns the repo, its folder under `models` and the files to fetch, model first.
+pub async fn plan(http: &reqwest::Client, spec: &str, models: &Path) -> Result<(String, PathBuf, Vec<String>)> {
+    let (name, quant) = match spec.rsplit_once(':') {
+        Some((n, q)) => (n, Some(q.to_ascii_uppercase())),
+        None => (spec, None),
+    };
+    let repo = if name.contains('/') {
+        name.to_owned()
+    } else {
+        let found = search(http, name).await?;
+        let pick = found.iter().find(|r| r.id.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name)));
+        pick.or(found.first()).with_context(|| format!("no GGUF repo on Hugging Face matches {name:?}"))?.id.clone()
+    };
+    let listed = files(http, &repo).await?;
+    let hw = hardware();
+    let judged: Vec<File> = listed
+        .iter()
+        .map(|(n, size)| File {
+            name: n.clone(),
+            size: *size,
+            mmproj: n.to_ascii_lowercase().contains("mmproj"),
+            fit: fit(*size, &hw),
+            installed: false,
+        })
+        .collect();
+    let file = pick_file(&judged, quant.as_deref(), &hw).map_err(|e| anyhow::anyhow!("{repo}: {e}"))?;
+    let dir = models.join(folder(&repo));
+    let queue = with_projector(&listed, &file, &dir);
+    Ok((repo, dir, queue))
+}
+
+/// The file a quant names, or the recommended one for this machine.
+fn pick_file(files: &[File], quant: Option<&str>, hw: &Hardware) -> Result<String, String> {
+    let models = || files.iter().filter(|f| !f.mmproj);
+    match quant {
+        Some(q) => {
+            // `Q4_0` must pick `m-Q4_0.gguf` over `m-Q4_0_4_4.gguf`: an exact ending beats a substring.
+            let upper = |f: &&File| f.name.to_ascii_uppercase();
+            let exact = models().find(|f| upper(f).ends_with(&format!("{q}.GGUF")));
+            exact.or_else(|| models().find(|f| upper(f).contains(q))).map(|f| f.name.clone()).ok_or_else(|| {
+                let names: Vec<&str> = models().map(|f| f.name.as_str()).collect();
+                format!("no file matches {q}; the repo has: {}", names.join(", "))
+            })
+        }
+        None => recommend(files, hw)
+            .map(|f| f.name.clone())
+            .ok_or_else(|| "no file fits this machine; pick one with :QUANT".to_owned()),
+    }
+}
+
 /// Each repo downloads into its own folder: repos reuse names like `mmproj-model-f16.gguf`.
 fn folder(repo: &str) -> String {
     repo.replace('/', "__")
@@ -271,24 +340,17 @@ impl Downloads {
 /// Starts downloading `file` from `repo`, with the smallest projector if the repo has one. The file
 /// must be one the repo lists; the URL is built here, never taken from the client.
 pub async fn start(lair: Arc<Lair>, repo: String, file: String) -> Result<()> {
-    let dir = lair.models.dir().context("nenhuma pasta de modelos com permissão de escrita")?.join(folder(&repo));
+    let dir = lair.models.dir().context("no writable models folder")?.join(folder(&repo));
     let listed = files(&lair.http, &repo).await?;
     if !listed.iter().any(|(n, _)| *n == file) {
-        bail!("{file} não está em {repo}");
+        bail!("{file} is not in {repo}");
     }
-    let mut queue = vec![file.clone()];
-    if !file.to_ascii_lowercase().contains("mmproj")
-        && let Some((proj, _)) =
-            listed.iter().filter(|(n, _)| n.to_ascii_lowercase().contains("mmproj")).min_by_key(|(_, s)| *s)
-        && !dir.join(proj).exists()
-    {
-        queue.push(proj.clone());
-    }
-    std::fs::create_dir_all(&dir).with_context(|| format!("criando {}", dir.display()))?;
+    let queue = with_projector(&listed, &file, &dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     // One lock from the check to the abort handle: a cancel can never miss a download that started.
     let mut list = lair.downloads.list.lock().unwrap();
     if list.get(&file).is_some_and(|(p, _)| !p.finished && p.error.is_none()) {
-        bail!("{file} já está sendo baixado");
+        bail!("{file} is already downloading");
     }
     let total = listed.iter().filter(|(n, _)| queue.contains(n)).map(|(_, s)| s).sum();
     let p = Progress { repo: repo.clone(), file: file.clone(), done: 0, total, finished: false, error: None };
@@ -298,7 +360,7 @@ pub async fn start(lair: Arc<Lair>, repo: String, file: String) -> Result<()> {
         tokio::spawn(async move {
             let mut before = 0;
             for name in &queue {
-                let url = format!("{HF}/{repo}/resolve/main/{name}");
+                let url = file_url(&repo, name);
                 let res =
                     download(&url, &dir, |done, _| lair.downloads.update(&file, |p| p.done = before + done)).await;
                 match res {
@@ -403,6 +465,29 @@ mod tests {
             assert!(check_repo(bad).is_err(), "{bad}");
         }
         assert_eq!(folder("Qwen/Qwen3-8B-GGUF"), "Qwen__Qwen3-8B-GGUF");
+    }
+
+    #[test]
+    fn pull_picks_the_named_quant_or_the_recommendation() {
+        let hw = Hardware { gpus: vec![], vram: 0, ram: 64_000_000_000 };
+        let files = [
+            file("m-Q4_0_4_4.gguf", 2_000_000_000, &hw),
+            file("m-Q4_0.gguf", 2_000_000_000, &hw),
+            file("m-Q4_K_M.gguf", 2_000_000_000, &hw),
+            file("m-Q8_0.gguf", 4_000_000_000, &hw),
+        ];
+        assert_eq!(pick_file(&files, Some("Q4_0"), &hw).unwrap(), "m-Q4_0.gguf");
+        assert_eq!(pick_file(&files, Some("Q8_0"), &hw).unwrap(), "m-Q8_0.gguf");
+        assert_eq!(pick_file(&files, None, &hw).unwrap(), "m-Q4_K_M.gguf");
+        let err = pick_file(&files, Some("Q2_K"), &hw).unwrap_err();
+        assert!(err.contains("m-Q8_0.gguf"), "{err}");
+    }
+
+    #[test]
+    fn a_vision_model_brings_its_projector() {
+        let listed = [("m.gguf".to_owned(), 9), ("mmproj-f16.gguf".to_owned(), 2), ("mmproj-f32.gguf".to_owned(), 4)];
+        let dir = std::env::temp_dir().join("lair-no-such-dir");
+        assert_eq!(with_projector(&listed, "m.gguf", &dir), ["m.gguf", "mmproj-f16.gguf"]);
     }
 
     #[test]
