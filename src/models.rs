@@ -58,10 +58,10 @@ impl Models {
 
     /// Starts a generation, here or on the peer that has the model. Dropping the receiver stops it.
     pub fn generate(&self, id: &str, msgs: Vec<Msg>, params: Params) -> mpsc::UnboundedReceiver<Event> {
-        if !self.local.iter().any(|m| m.id == id) {
-            if let Some((base, model)) = self.peers.locate(id) {
-                return self.peers.generate(base, model, msgs, params);
-            }
+        if !self.local.iter().any(|m| m.id == id)
+            && let Some((base, model)) = self.peers.locate(id)
+        {
+            return self.peers.generate(base, model, msgs, params);
         }
         self.generate_local(id, msgs, params)
     }

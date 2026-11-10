@@ -268,7 +268,7 @@ impl Py {
                     w => w
                         .parse::<f64>()
                         .ok()
-                        .and_then(|n| serde_json::Number::from_f64(n))
+                        .and_then(serde_json::Number::from_f64)
                         .map(Value::Number)
                         .ok_or(format!("valor desconhecido {w:?}")),
                 }

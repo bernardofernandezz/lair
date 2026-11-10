@@ -124,10 +124,10 @@ impl Peers {
         let mut candidates: Vec<String> = manual.iter().map(|p| self.base(p)).collect();
         if let Ok(status) = self.local_get("status").await {
             for peer in status["Peer"].as_object().into_iter().flat_map(|m| m.values()) {
-                if peer["Online"].as_bool() == Some(true) {
-                    if let Some(dns) = peer["DNSName"].as_str() {
-                        candidates.push(self.base(dns.trim_end_matches('.')));
-                    }
+                if peer["Online"].as_bool() == Some(true)
+                    && let Some(dns) = peer["DNSName"].as_str()
+                {
+                    candidates.push(self.base(dns.trim_end_matches('.')));
                 }
             }
         }
@@ -187,10 +187,10 @@ impl Peers {
         if !is_tailscale_ip(ip) || self.socket.is_none() {
             return false;
         }
-        if let Some((at, ok)) = self.whois.lock().unwrap().get(&ip) {
-            if at.elapsed() < WHOIS_TTL {
-                return *ok;
-            }
+        if let Some((at, ok)) = self.whois.lock().unwrap().get(&ip)
+            && at.elapsed() < WHOIS_TTL
+        {
+            return *ok;
         }
         let ok = self.local_get(&format!("whois?addr={ip}:0")).await.is_ok_and(|w| w["Node"].is_object());
         self.whois.lock().unwrap().insert(ip, (Instant::now(), ok));

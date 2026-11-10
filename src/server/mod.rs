@@ -113,10 +113,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn cookie_value(req: &Request, name: &str) -> Option<String> {
     let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
     for part in raw.split(';') {
-        if let Some((key, value)) = part.trim().split_once('=') {
-            if key == name {
-                return percent_decode(value);
-            }
+        if let Some((key, value)) = part.trim().split_once('=')
+            && key == name
+        {
+            return percent_decode(value);
         }
     }
     None

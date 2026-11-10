@@ -42,6 +42,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once at startup; boxing `Serve`'s flags would only make the clap derive harder to read.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Interactive chat in the terminal
     #[command(visible_alias = "run")]

@@ -111,7 +111,7 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), b"no").unwrap();
         std::fs::write(dir.join(".hidden.glb"), b"no").unwrap();
 
-        let a = Assets::new(&[dir.clone()]);
+        let a = Assets::new(std::slice::from_ref(&dir));
         assert_eq!(a.ids(), ["robot.glb", "sub/ship.gltf"]);
         assert!(a.resolve("robot.glb").is_some());
         assert!(a.resolve("sub/ship.bin").is_some());
@@ -131,7 +131,7 @@ mod tests {
         std::fs::write(outside.join("secret.glb"), b"secret").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.join("secret.glb"), dir.join("link.glb")).unwrap();
-        let a = Assets::new(&[dir.clone()]);
+        let a = Assets::new(std::slice::from_ref(&dir));
         assert!(a.resolve("link.glb").is_none());
         assert!(a.ids().is_empty());
         let _ = std::fs::remove_dir_all(dir);
