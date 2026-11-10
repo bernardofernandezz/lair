@@ -87,25 +87,25 @@ function fail(path: string, message: string): never {
 /** Parses one scene block. Unknown keys are ignored; malformed values never throw. */
 export function parseScene(source: string): ParseResult {
   if (source.length > MAX_SOURCE) {
-    return { ok: false, error: `Cena grande demais (${Math.round(source.length / 1024)} KB; limite 256 KB).` };
+    return { ok: false, error: `Scene too big (${Math.round(source.length / 1024)} KB; the limit is 256 KB).` };
   }
   let raw: unknown;
   try {
     raw = JSON5.parse(source);
   } catch (e) {
-    return { ok: false, error: `JSON inválido: ${(e as Error).message}` };
+    return { ok: false, error: `Invalid JSON: ${(e as Error).message}` };
   }
   try {
     return { ok: true, scene: buildScene(raw) };
   } catch (e) {
-    return { ok: false, error: e instanceof SceneError ? e.message : `Cena inválida: ${(e as Error).message}` };
+    return { ok: false, error: e instanceof SceneError ? e.message : `Invalid scene: ${(e as Error).message}` };
   }
 }
 
 function buildScene(raw: unknown): Scene {
   const s = obj(raw, "cena");
   const nodes = arr(s.nodes, "nodes", MAX_NODES);
-  if (nodes.length === 0) fail("nodes", "a cena precisa de pelo menos um node");
+  if (nodes.length === 0) fail("nodes", "the scene needs at least one node");
   const count = { n: 0 };
   const assets = new Set<string>();
   const title = s.title == null ? undefined : text(s.title, "title", 200);
@@ -132,7 +132,7 @@ function parseLight(v: unknown, path: string): Light {
   const l = obj(v, path);
   const kind = text(l.kind, `${path}.kind`, 16);
   if (!["ambient", "directional", "point", "spot"].includes(kind)) {
-    fail(`${path}.kind`, `luz desconhecida "${kind}"`);
+    fail(`${path}.kind`, `unknown light "${kind}"`);
   }
   const light: Light = {
     kind: kind as Light["kind"],
@@ -160,14 +160,14 @@ function parseNode(
   count: { n: number },
   assets: Set<string>,
 ): Node[] {
-  if (depth > MAX_DEPTH) fail(path, `profundidade máxima de ${MAX_DEPTH}`);
+  if (depth > MAX_DEPTH) fail(path, `maximum depth is ${MAX_DEPTH}`);
   const before = count.n;
   count.n += 1;
-  if (count.n > MAX_NODES) fail(path, `a cena passa de ${MAX_NODES} nodes`);
+  if (count.n > MAX_NODES) fail(path, `the scene has more than ${MAX_NODES} nodes`);
   const n = obj(v, path);
   const hasGeometry = n.geometry != null;
   const asset = n.asset == null ? undefined : assetId(n.asset, `${path}.asset`, assets);
-  if (hasGeometry && asset) fail(path, "use geometry ou asset, não os dois");
+  if (hasGeometry && asset) fail(path, "use geometry or asset, not both");
   const children = n.children == null ? [] : arr(n.children, `${path}.children`, MAX_NODES);
   const node: Node = {
     geometry: hasGeometry ? parseGeometry(n.geometry, `${path}.geometry`) : undefined,
@@ -196,7 +196,7 @@ function repeat(node: Node, r: Record<string, unknown>, path: string, count: { n
   const grow = vec3(r.scale, `${path}.scale`, [1, 1, 1], 0.01, 100);
   // Each extra copy is the node's subtree again plus its wrapper; the first copy also gets a wrapper.
   count.n += (times - 1) * size + times;
-  if (count.n > MAX_NODES) fail(path, `a cena passa de ${MAX_NODES} nodes com as repetições`);
+  if (count.n > MAX_NODES) fail(path, `the scene has more than ${MAX_NODES} nodes with the repeats`);
   return Array.from({ length: times }, (_, i) => ({
     material: node.material,
     position: offset.map((o) => o * i) as Vec3,
@@ -209,7 +209,7 @@ function repeat(node: Node, r: Record<string, unknown>, path: string, count: { n
 function parseOrbit(v: unknown, path: string): Orbit {
   const o = obj(v, path);
   const axis = text(o.axis ?? "y", `${path}.axis`, 1).toLowerCase();
-  if (axis !== "x" && axis !== "y" && axis !== "z") fail(`${path}.axis`, `eixo inválido "${axis}"`);
+  if (axis !== "x" && axis !== "y" && axis !== "z") fail(`${path}.axis`, `invalid axis "${axis}"`);
   return {
     radius: num(o.radius, `${path}.radius`, 2, 0, 1e5),
     speed: num(o.speed, `${path}.speed`, 0.5, -100, 100),
@@ -276,7 +276,7 @@ function parseGeometry(v: unknown, path: string): Geometry {
       let segments: [number, number] = [96, 16];
       if (Array.isArray(raw)) {
         const pair = arr(raw, `${path}.segments`, 2);
-        if (pair.length !== 2) fail(`${path}.segments`, "esperava [radial, tubular]");
+        if (pair.length !== 2) fail(`${path}.segments`, "expected [radial, tubular]");
         segments = [
           Math.round(num(pair[0], `${path}.segments[0]`, 96, 3, 256)),
           Math.round(num(pair[1], `${path}.segments[1]`, 16, 3, 64)),
@@ -312,24 +312,24 @@ function parseGeometry(v: unknown, path: string): Geometry {
     case "lines":
       return parseLines(g, path);
     default:
-      fail(`${path}.kind`, `geometria desconhecida "${kind}"`);
+      fail(`${path}.kind`, `unknown geometry "${kind}"`);
   }
 }
 
 function parsePolyhedron(g: Record<string, unknown>, path: string): Geometry {
   const rawV = arr(g.vertices, `${path}.vertices`, MAX_VERTICES);
-  if (rawV.length < 3) fail(`${path}.vertices`, "precisa de pelo menos 3 vértices");
+  if (rawV.length < 3) fail(`${path}.vertices`, "needs at least 3 vertices");
   const vertices = rawV.map((v, i) => vec3(v, `${path}.vertices[${i}]`, [0, 0, 0], -1e4, 1e4));
   const rawF = arr(g.faces, `${path}.faces`, MAX_FACES);
-  if (rawF.length === 0) fail(`${path}.faces`, "precisa de pelo menos uma face");
+  if (rawF.length === 0) fail(`${path}.faces`, "needs at least one face");
   const faces: [number, number, number][] = [];
   rawF.forEach((f, i) => {
     const idx = arr(f, `${path}.faces[${i}]`, 12);
-    if (idx.length < 3) fail(`${path}.faces[${i}]`, "uma face precisa de pelo menos 3 índices");
+    if (idx.length < 3) fail(`${path}.faces[${i}]`, "a face needs at least 3 indices");
     const points = idx.map((x, j) => index(x, `${path}.faces[${i}][${j}]`, vertices.length));
     for (let k = 1; k + 1 < points.length; k++) {
       faces.push([points[0], points[k], points[k + 1]]);
-      if (faces.length > MAX_FACES) fail(`${path}.faces`, `limite de ${MAX_FACES} triângulos`);
+      if (faces.length > MAX_FACES) fail(`${path}.faces`, `limit of ${MAX_FACES} triangles`);
     }
   });
   return { kind: "polyhedron", vertices, faces, flat: bool(g.flat, `${path}.flat`, false) };
@@ -337,12 +337,12 @@ function parsePolyhedron(g: Record<string, unknown>, path: string): Geometry {
 
 function parsePoints(g: Record<string, unknown>, path: string): Geometry {
   const raw = arr(g.positions, `${path}.positions`, MAX_POINTS);
-  if (raw.length === 0) fail(`${path}.positions`, "precisa de pelo menos um ponto");
+  if (raw.length === 0) fail(`${path}.positions`, "needs at least one point");
   const positions = raw.map((p, i) => vec3(p, `${path}.positions[${i}]`, [0, 0, 0], -1e5, 1e5));
   let colors: string[] | undefined;
   if (g.colors != null) {
     const list = arr(g.colors, `${path}.colors`, MAX_POINTS);
-    if (list.length !== positions.length) fail(`${path}.colors`, "precisa ter a mesma quantidade de positions");
+    if (list.length !== positions.length) fail(`${path}.colors`, "needs as many entries as positions");
     colors = list.map((c, i) => color(c, `${path}.colors[${i}]`, "#ffffff"));
   }
   return {
@@ -355,7 +355,7 @@ function parsePoints(g: Record<string, unknown>, path: string): Geometry {
 
 function parseLines(g: Record<string, unknown>, path: string): Geometry {
   const raw = arr(g.positions, `${path}.positions`, MAX_LINES);
-  if (raw.length < 2) fail(`${path}.positions`, "precisa de pelo menos dois pontos");
+  if (raw.length < 2) fail(`${path}.positions`, "needs at least two points");
   return {
     kind: "lines",
     positions: raw.map((p, i) => vec3(p, `${path}.positions[${i}]`, [0, 0, 0], -1e5, 1e5)),
@@ -370,51 +370,51 @@ function assetId(v: unknown, path: string, assets: Set<string>): string {
     !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(id) ||
     id.split("/").some((part) => !part || part === "." || part === "..")
   ) {
-    fail(path, "id de asset inválido (use caminho relativo sem ..)");
+    fail(path, "invalid asset id (use a relative path without ..)");
   }
   assets.add(id);
-  if (assets.size > MAX_ASSETS) fail(path, `no máximo ${MAX_ASSETS} assets por cena`);
+  if (assets.size > MAX_ASSETS) fail(path, `at most ${MAX_ASSETS} assets per scene`);
   return id;
 }
 
 function obj(v: unknown, path: string): Record<string, unknown> {
-  if (!v || typeof v !== "object" || Array.isArray(v)) fail(path, "esperava um objeto");
+  if (!v || typeof v !== "object" || Array.isArray(v)) fail(path, "expected an object");
   return v as Record<string, unknown>;
 }
 
 function arr(v: unknown, path: string, max: number): unknown[] {
-  if (!Array.isArray(v)) fail(path, "esperava uma lista");
-  if (v.length > max) fail(path, `limite de ${max} itens`);
+  if (!Array.isArray(v)) fail(path, "expected a list");
+  if (v.length > max) fail(path, `limit of ${max} items`);
   return v;
 }
 
 function num(v: unknown, path: string, def: number | undefined, min: number, max: number): number {
   if (v == null) {
-    if (def === undefined) fail(path, "número obrigatório");
+    if (def === undefined) fail(path, "number required");
     return def;
   }
-  if (typeof v !== "number" || !Number.isFinite(v)) fail(path, "esperava um número finito");
+  if (typeof v !== "number" || !Number.isFinite(v)) fail(path, "expected a finite number");
   return Math.min(max, Math.max(min, v));
 }
 
 function text(v: unknown, path: string, max: number): string {
-  if (typeof v !== "string") fail(path, "esperava um texto");
+  if (typeof v !== "string") fail(path, "expected a string");
   const s = v.trim();
-  if (!s) fail(path, "texto vazio");
-  if (s.length > max) fail(path, `texto com mais de ${max} caracteres`);
+  if (!s) fail(path, "empty string");
+  if (s.length > max) fail(path, `string longer than ${max} characters`);
   return s;
 }
 
 function bool(v: unknown, path: string, def: boolean): boolean {
   if (v == null) return def;
-  if (typeof v !== "boolean") fail(path, "esperava true ou false");
+  if (typeof v !== "boolean") fail(path, "expected true or false");
   return v;
 }
 
 function vec3(v: unknown, path: string, def: Vec3, min: number, max: number): Vec3 {
   if (v == null) return [...def];
   const list = arr(v, path, 3);
-  if (list.length !== 3) fail(path, "esperava [x, y, z]");
+  if (list.length !== 3) fail(path, "expected [x, y, z]");
   return [
     num(list[0], `${path}[0]`, undefined, min, max),
     num(list[1], `${path}[1]`, undefined, min, max),
@@ -425,22 +425,22 @@ function vec3(v: unknown, path: string, def: Vec3, min: number, max: number): Ve
 function pair2(v: unknown, path: string, def: [number, number], min: number, max: number): [number, number] {
   if (v == null) return [...def];
   const list = arr(v, path, 2);
-  if (list.length !== 2) fail(path, "esperava [largura, profundidade]");
+  if (list.length !== 2) fail(path, "expected [width, depth]");
   return [num(list[0], `${path}[0]`, undefined, min, max), num(list[1], `${path}[1]`, undefined, min, max)];
 }
 
 function index(v: unknown, path: string, len: number): number {
   if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v >= len) {
-    fail(path, `índice fora de 0..${len - 1}`);
+    fail(path, `index outside 0..${len - 1}`);
   }
   return v;
 }
 
 function color(v: unknown, path: string, def = GREY): string {
   if (v == null) return def;
-  if (typeof v !== "string") fail(path, "cor deve ser hexadecimal (#rrggbb)");
+  if (typeof v !== "string") fail(path, "color must be hex (#rrggbb)");
   const s = v.trim().toLowerCase();
   if (/^#[0-9a-f]{6}$/.test(s)) return s;
   if (/^#[0-9a-f]{3}$/.test(s)) return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`;
-  fail(path, `cor inválida "${s}" (use #rrggbb)`);
+  fail(path, `invalid color "${s}" (use #rrggbb)`);
 }

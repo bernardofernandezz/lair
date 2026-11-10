@@ -102,6 +102,9 @@ pub enum Finish {
     Stop,
     /// It hit `max_tokens` or the context size.
     Length,
+    /// It stopped to call a tool a chat API client offered.
+    #[serde(rename = "tool_calls")]
+    ToolCalls,
 }
 
 #[derive(Clone, Debug)]

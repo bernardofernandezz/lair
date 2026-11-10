@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response, sse as axum_sse};
@@ -20,7 +20,11 @@ struct AssetsUi;
 
 mod compat;
 mod native;
+mod ollama;
 mod settings;
+
+/// Chat API requests carry images inline as base64, so they get more room than axum's 2 MB default.
+const API_BODY: usize = 32 * 1024 * 1024;
 
 /// How often other lair nodes on the tailnet are looked for.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
@@ -48,10 +52,13 @@ pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Res
         .route("/assets/{*id}", get(asset_file))
         .route("/session", post(create_session))
         .route_layer(auth.clone())
-        .fallback(no_route);
+        .fallback(no_route)
+        .layer(DefaultBodyLimit::max(API_BODY));
+    let ollama = ollama::routes().route_layer(auth.clone()).fallback(no_route).layer(DefaultBodyLimit::max(API_BODY));
     let native = native::routes().route_layer(auth).fallback(no_route);
     let lair = state.lair.clone();
-    let app = Router::new().nest("/v1", v1).nest("/lair/v1", native).fallback(web_ui).with_state(state);
+    let app =
+        Router::new().nest("/v1", v1).nest("/api", ollama).nest("/lair/v1", native).fallback(web_ui).with_state(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
     let stop = async move {

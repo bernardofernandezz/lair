@@ -193,11 +193,11 @@ async fn file(State(s): S, Path(id): Path<String>) -> ApiResult<Response> {
 async fn read_file(mut form: Multipart) -> ApiResult<(String, Vec<u8>)> {
     while let Some(field) = form.next_field().await.map_err(bad)? {
         if field.name() == Some("file") {
-            let name = field.file_name().unwrap_or("arquivo").to_owned();
+            let name = field.file_name().unwrap_or("file").to_owned();
             return Ok((name, field.bytes().await.map_err(bad)?.to_vec()));
         }
     }
-    Err(bad(anyhow::anyhow!("o formulário não tem o campo \"file\"")))
+    Err(bad(anyhow::anyhow!("the form has no \"file\" field")))
 }
 
 /// The configured skills index, marking which entries are already installed.
@@ -315,7 +315,7 @@ async fn hub_download(State(s): S, Json(r): Json<DownloadRequest>) -> ApiResult<
 async fn hub_cancel(State(s): S, Path(file): Path<String>) -> ApiResult<StatusCode> {
     match s.lair.downloads.cancel(&file, s.lair.models.dir()) {
         true => Ok(StatusCode::NO_CONTENT),
-        false => Err(missing("nenhum download com esse nome")),
+        false => Err(missing("no download with that name")),
     }
 }
 

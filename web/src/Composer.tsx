@@ -1,6 +1,40 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Api, Conversation, FileTypes, Ref } from "./api";
 import { mentionAt, useMentionOptions } from "./conversations/mention";
+import { pick } from "./i18n";
+
+const T = pick({
+  en: {
+    imagesDropped: "This model can't see images; they were taken out of the message.",
+    noVision: "This model can't see images. Pick a vision model (with its mmproj next to the .gguf).",
+    accepted: "Text documents, code, .pdf and images are accepted.",
+    tooMany: (n: number) => `Up to ${n} attachments per message.`,
+    drop: "Drop to attach",
+    cite: "Cite a chat",
+    placeholder: "Write a message. Use @ to cite another chat.",
+    message: "Message",
+    attach: "Attach file",
+    attachVision: "Attach a document or image (or paste / drag it here)",
+    attachDoc: "Attach a document: text, code, .pdf (or drag it here)",
+    stop: "Stop answer",
+    send: "Send",
+  },
+  pt: {
+    imagesDropped: "Esse modelo não enxerga imagens; elas foram tiradas da mensagem.",
+    noVision: "Esse modelo não enxerga imagens. Escolha um modelo de visão (com o mmproj ao lado do .gguf).",
+    accepted: "Aceito documentos de texto, código, .pdf e imagens.",
+    tooMany: (n: number) => `Até ${n} anexos por mensagem.`,
+    drop: "Solte para anexar",
+    cite: "Citar conversa",
+    placeholder: "Escreva uma mensagem. Use @ para citar outra conversa.",
+    message: "Mensagem",
+    attach: "Anexar arquivo",
+    attachVision: "Anexar documento ou imagem (ou cole / arraste aqui)",
+    attachDoc: "Anexar documento: texto, código, .pdf (ou arraste aqui)",
+    stop: "Parar resposta",
+    send: "Enviar",
+  },
+});
 
 const MAX_FILES = 8;
 
@@ -45,7 +79,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
   useEffect(() => {
     if (vision || !files.some((f) => f.image)) return;
     setFiles((fs) => fs.filter((f) => !f.image));
-    setWarn("Esse modelo não enxerga imagens; elas foram tiradas da mensagem.");
+    setWarn(T.imagesDropped);
   }, [vision, files]);
 
   function track(text: string, caret: number) {
@@ -75,9 +109,9 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
     const bad = picked.filter((f) => !good.includes(f));
     const take = good.slice(0, Math.max(0, MAX_FILES - files.length));
     if (take.length) setFiles([...files, ...take.map((file) => ({ file, image: image(file) }))]);
-    if (bad.some(image)) setWarn("Esse modelo não enxerga imagens. Escolha um modelo de visão (com o mmproj ao lado do .gguf).");
-    else if (bad.length) setWarn("Aceito documentos de texto, código, .pdf e imagens.");
-    else if (good.length > take.length) setWarn(`Até ${MAX_FILES} anexos por mensagem.`);
+    if (bad.some(image)) setWarn(T.noVision);
+    else if (bad.length) setWarn(T.accepted);
+    else if (good.length > take.length) setWarn(T.tooMany(MAX_FILES));
   }
 
   const remove = (f: Pending) => setFiles(files.filter((x) => x !== f));
@@ -126,7 +160,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
     >
       {dragging && (
         <div className="drop-hint" aria-hidden>
-          Solte para anexar
+          {T.drop}
         </div>
       )}
       {hello && <p className="hello">{hello}</p>}
@@ -136,7 +170,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
         </p>
       )}
       {picking && (
-        <ul className="mention" role="listbox" aria-label="Citar conversa">
+        <ul className="mention" role="listbox" aria-label={T.cite}>
           {options.map((o, i) => (
             <li
               key={o.id}
@@ -185,8 +219,8 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
         rows={1}
         autoFocus
         value={draft}
-        placeholder="Escreva uma mensagem. Use @ para citar outra conversa."
-        aria-label="Mensagem"
+        placeholder={T.placeholder}
+        aria-label={T.message}
         aria-autocomplete="list"
         aria-expanded={picking}
         onChange={(e) => track(e.target.value, e.target.selectionStart)}
@@ -229,8 +263,8 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
         <button
           type="button"
           className="attach"
-          aria-label="Anexar arquivo"
-          title={vision ? "Anexar documento ou imagem (ou cole / arraste aqui)" : "Anexar documento: texto, código, .pdf (ou arraste aqui)"}
+          aria-label={T.attach}
+          title={vision ? T.attachVision : T.attachDoc}
           onClick={() => fileInput.current?.click()}
         >
           <svg viewBox="0 0 24 24" aria-hidden>
@@ -239,13 +273,13 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
         </button>
         {tools}
         {busy ? (
-          <button type="button" className="send" onClick={onStop} aria-label="Parar resposta">
+          <button type="button" className="send" onClick={onStop} aria-label={T.stop}>
             <svg viewBox="0 0 24 24" aria-hidden>
               <rect x="7" y="7" width="10" height="10" rx="2" />
             </svg>
           </button>
         ) : (
-          <button className="send" disabled={!canSend} aria-label="Enviar">
+          <button className="send" disabled={!canSend} aria-label={T.send}>
             <svg viewBox="0 0 24 24" aria-hidden>
               <path d="M12 19V5M6 11l6-6 6 6" />
             </svg>

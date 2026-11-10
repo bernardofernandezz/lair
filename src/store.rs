@@ -245,7 +245,7 @@ impl Store {
             .messages(id)?
             .iter()
             .filter(|m| m.role != "tool")
-            .map(|m| format!("{}: {}\n", if m.role == "user" { "Usuário" } else { "Assistente" }, m.content))
+            .map(|m| format!("{}: {}\n", if m.role == "user" { "User" } else { "Assistant" }, m.content))
             .collect())
     }
 

@@ -252,9 +252,9 @@ const LISTED_ASSETS: usize = 40;
 
 fn assets_section(assets: &[String]) -> String {
     if assets.is_empty() {
-        return "Nenhum arquivo 3D local disponível: use apenas primitivas.".to_owned();
+        return "No local 3D files available: use primitives only.".to_owned();
     }
-    let mut out = String::from("Arquivos 3D locais disponíveis (use o id no campo `asset`):\n");
+    let mut out = String::from("Local 3D files available (put the id in the `asset` field):\n");
     for id in assets.iter().take(LISTED_ASSETS) {
         let _ = writeln!(out, "- {id}");
     }

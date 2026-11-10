@@ -1,14 +1,24 @@
 import { useState } from "react";
 import type { ToolStep } from "../parts";
 import { domain, parseSources, type Source } from "./sources";
+import { pick } from "../i18n";
 
-const STATUS: Record<ToolStep["status"], string> = {
-  pending: "Aguardando você",
-  running: "Executando",
-  ok: "Feito",
-  error: "Falhou",
-  denied: "Negado",
-};
+const T = pick({
+  en: { pending: "Waiting for you", running: "Running", ok: "Done", error: "Failed", denied: "Denied", awaiting: "Action waiting for approval", allow: "Allow", always: "Always in this chat", deny: "Deny", less: "Show less", all: "Show all" },
+  pt: { pending: "Aguardando você", running: "Executando", ok: "Feito", error: "Falhou", denied: "Negado", awaiting: "Ação aguardando aprovação", allow: "Permitir", always: "Sempre nesta conversa", deny: "Negar", less: "Ver menos", all: "Ver tudo" },
+});
+
+const STATUS: Record<ToolStep["status"], string> = T;
+
+/** The server names tools in English; Portuguese UIs show these instead. */
+const LABEL = pick<Record<string, string>>({
+  en: {},
+  pt: {
+    list_dir: "Listar pasta", read_file: "Ler arquivo", write_file: "Escrever arquivo", edit_file: "Editar arquivo",
+    delete_file: "Apagar arquivo", run_command: "Rodar comando", web_search: "Buscar na web", fetch_url: "Abrir página",
+    search_conversations: "Buscar conversas", read_conversation: "Ler conversa", list_skills: "Listar skills", save_skill: "Salvar skill",
+  },
+});
 
 type Props = {
   step: ToolStep;
@@ -28,11 +38,11 @@ export function ToolCard({ step, onDecide }: Props) {
   }
 
   return (
-    <div className={`tool is-${step.status}`} role={pending ? "group" : undefined} aria-label={pending ? "Ação aguardando aprovação" : undefined}>
+    <div className={`tool is-${step.status}`} role={pending ? "group" : undefined} aria-label={pending ? T.awaiting : undefined}>
       <details open={pending}>
         <summary>
           <span className="tool-dot" aria-hidden />
-          <span className="tool-name">{step.label}</span>
+          <span className="tool-name">{LABEL[step.name] ?? step.label}</span>
           <code className="tool-subject">{step.subject}</code>
           <span className="tool-status">{STATUS[step.status]}</span>
         </summary>
@@ -47,13 +57,13 @@ export function ToolCard({ step, onDecide }: Props) {
       {pending && (
         <div className="tool-actions">
           <button className="solid" disabled={deciding} onClick={() => decide(true)}>
-            Permitir
+            {T.allow}
           </button>
           <button className="ghost" disabled={deciding} onClick={() => decide(true, true)}>
-            Sempre nesta conversa
+            {T.always}
           </button>
           <button className="ghost" disabled={deciding} onClick={() => decide(false)}>
-            Negar
+            {T.deny}
           </button>
         </div>
       )}
@@ -78,10 +88,10 @@ function SearchResults({ results }: { results: Source[] }) {
   );
 }
 
-/** `fetch_url` output starts with `Título: …` when the page had one. */
+/** `fetch_url` output starts with `Title: …` when the page had one. */
 function readPage(output?: string) {
   if (!output) return null;
-  const m = output.match(/^Título: (.*)\n\n/);
+  const m = output.match(/^(?:Title|Título): (.*)\n\n/);
   return { title: m?.[1] ?? null, text: m ? output.slice(m[0].length) : output };
 }
 
@@ -93,7 +103,7 @@ function PageText({ title, text }: { title: string | null; text: string }) {
       <pre className={`tool-detail${all ? "" : " is-clamped"}`}>{text}</pre>
       {text.length > 400 && (
         <button type="button" className="ghost page-more" onClick={() => setAll((a) => !a)}>
-          {all ? "Ver menos" : "Ver tudo"}
+          {all ? T.less : T.all}
         </button>
       )}
     </div>
