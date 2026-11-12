@@ -22,18 +22,55 @@ mod compat;
 mod native;
 mod ollama;
 mod settings;
+#[cfg(test)]
+pub(crate) mod tests;
 
 /// Chat API requests carry images inline as base64, so they get more room than axum's 2 MB default.
 const API_BODY: usize = 32 * 1024 * 1024;
 
 /// How often other lair nodes on the tailnet are looked for.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often idle models past their keep-alive are unloaded and new speed measurements saved.
+const HOUSEKEEPING: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct AppState {
     pub lair: Arc<Lair>,
     token: Option<String>,
     /// Where the server listens; the settings UI warns when other machines can't reach it.
     pub addr: String,
+}
+
+/// Every route: the three APIs behind the token check, and the web UI for the rest.
+fn router(state: Arc<AppState>) -> Router {
+    let auth = middleware::from_fn_with_state(state.clone(), require_token);
+    let v1 = Router::new()
+        .route("/models", get(compat::models))
+        .route("/models/{id}", get(compat::model))
+        .route("/chat/completions", post(compat::chat_completions))
+        .route("/completions", post(compat::completions))
+        .route("/embeddings", post(compat::embeddings))
+        .route("/assets/{*id}", get(asset_file))
+        .route("/session", post(create_session))
+        .route_layer(auth.clone())
+        .fallback(no_route)
+        .layer(DefaultBodyLimit::max(API_BODY));
+    let ollama = ollama::routes().route_layer(auth.clone()).fallback(no_route).layer(DefaultBodyLimit::max(API_BODY));
+    let native = native::routes().route_layer(auth).fallback(no_route);
+    Router::new().nest("/v1", v1).nest("/api", ollama).nest("/lair/v1", native).fallback(web_ui).with_state(state)
+}
+
+/// Saves the speeds measured since the last save, on top of what is stored: `lair bench` may have
+/// added its own in the meantime.
+fn save_bench(lair: &Lair) {
+    let Some(measured) = lair.models.unsaved_bench() else { return };
+    let stored = lair.store.kv("bench").ok().flatten().and_then(|v| serde_json::from_value(v).ok());
+    let mut all: crate::speed::Bench = stored.unwrap_or_default();
+    all.samples.extend(measured.samples);
+    if let Err(e) =
+        serde_json::to_value(&all).map_err(anyhow::Error::from).and_then(|v| lair.store.save_kv("bench", &v))
+    {
+        eprintln!("saving the measured speeds failed: {e:#}");
+    }
 }
 
 pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Result<()> {
@@ -45,25 +82,23 @@ pub async fn run(lair: Lair, token: Option<String>, addr: String) -> anyhow::Res
             tokio::time::sleep(PEER_REFRESH).await;
         }
     });
-    let auth = middleware::from_fn_with_state(state.clone(), require_token);
-    let v1 = Router::new()
-        .route("/models", get(compat::models))
-        .route("/chat/completions", post(compat::chat_completions))
-        .route("/assets/{*id}", get(asset_file))
-        .route("/session", post(create_session))
-        .route_layer(auth.clone())
-        .fallback(no_route)
-        .layer(DefaultBodyLimit::max(API_BODY));
-    let ollama = ollama::routes().route_layer(auth.clone()).fallback(no_route).layer(DefaultBodyLimit::max(API_BODY));
-    let native = native::routes().route_layer(auth).fallback(no_route);
     let lair = state.lair.clone();
-    let app =
-        Router::new().nest("/v1", v1).nest("/api", ollama).nest("/lair/v1", native).fallback(web_ui).with_state(state);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(HOUSEKEEPING).await;
+            lair.models.reap();
+            save_bench(&lair);
+        }
+    });
+    tokio::spawn(crate::memory::run(state.lair.clone()));
+    let lair = state.lair.clone();
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
     let stop = async move {
         shutdown().await;
         lair.stopping.send_replace(true);
+        save_bench(&lair);
     };
     let server =
         axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(stop);
@@ -233,6 +268,13 @@ type ApiResult<T> = Result<T, ApiError>;
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{:#}", e.into()))
+    }
+}
+
+impl ApiError {
+    /// The status and message, for an API that words its errors differently.
+    fn parts(self) -> (StatusCode, String) {
+        (self.0, self.1)
     }
 }
 

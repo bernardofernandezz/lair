@@ -20,11 +20,11 @@ use super::{ApiResult, AppState, bad, missing, settings, sse};
 use crate::agent::Decision;
 use crate::attach;
 use crate::engine::{Msg, Params};
-use crate::hub;
 use crate::peers::NodeInfo;
 use crate::skills::{Manifest, Skill, install, slug};
 use crate::store::{Conversation, Hit, Settings};
 use crate::turn;
+use crate::{download, hub, memory as mem};
 
 type S = State<Arc<AppState>>;
 
@@ -48,8 +48,13 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/hub/suggested", get(hub_suggested))
         .route("/hub/search", get(hub_search))
         .route("/hub/files", get(hub_files))
-        .route("/hub/downloads", get(hub_downloads).post(hub_download))
-        .route("/hub/downloads/{file}", axum::routing::delete(hub_cancel))
+        .route("/hub/downloads", get(hub_downloads).post(hub_download).delete(hub_cancel))
+        .route("/models", get(models))
+        .route("/models/{id}", axum::routing::delete(remove_model))
+        .route("/models/{id}/load", post(load_model))
+        .route("/models/{id}/unload", post(unload_model))
+        .route("/memory", get(memory).delete(forget))
+        .route("/memory/search", get(memory_search))
         .layer(DefaultBodyLimit::max(attach::MAX_UPLOAD + 64 * 1024))
         .merge(settings::routes())
 }
@@ -172,6 +177,7 @@ struct Uploaded {
 async fn upload_file(State(s): S, form: Multipart) -> ApiResult<Json<Uploaded>> {
     let (name, data) = read_file(form).await?;
     let id = attach::save(&s.lair.workspace, &name, &data).map_err(bad)?;
+    s.lair.memory.wake();
     Ok(Json(Uploaded { id, name }))
 }
 
@@ -220,6 +226,7 @@ async fn node(State(s): S) -> Json<NodeInfo> {
         name: s.lair.node_name(),
         version: env!("CARGO_PKG_VERSION").into(),
         models: s.lair.models.local(),
+        active: s.lair.models.active(),
     })
 }
 
@@ -238,39 +245,18 @@ async fn generate(State(s): S, Json(r): Json<GenerateRequest>) -> Response {
     Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
-async fn hub_hardware() -> Json<hub::Hardware> {
-    Json(hub::hardware())
+async fn hub_hardware() -> Json<crate::hw::Hardware> {
+    Json(crate::hw::hardware())
 }
 
-/// The curated repos, each with the file recommended for this machine; `best` marks the most capable
-/// one that runs entirely on it.
-async fn hub_suggested(State(s): S) -> ApiResult<Json<Vec<Value>>> {
-    let hw = hub::hardware();
-    let mut tasks = tokio::task::JoinSet::new();
-    for (i, (repo, about)) in hub::SUGGESTED.iter().enumerate() {
-        let lair = s.lair.clone();
-        tasks.spawn(async move { (i, *repo, *about, hub::judged(&lair, repo).await) });
+/// The models to offer on this machine, best first: what is trending on Hugging Face and what lair
+/// vouches for, each with the file to take and why; `best` marks the one to get (see [`hub::rank`]).
+async fn hub_suggested(State(s): S) -> ApiResult<Json<Vec<hub::Pick>>> {
+    let picks = hub::suggested(&s.lair).await;
+    if picks.is_empty() {
+        return Err(bad_gateway(anyhow::anyhow!("Hugging Face can't be reached right now")));
     }
-    let mut found = Vec::new();
-    while let Some(res) = tasks.join_next().await {
-        let (i, repo, about, files) = res?;
-        // A repo that can't be listed right now is left out rather than failing the whole list.
-        if let Ok(files) = files {
-            let pick = hub::recommend(&files, &hw).cloned();
-            found.push((i, repo, about, pick, files.iter().any(|f| f.mmproj)));
-        }
-    }
-    found.sort_by_key(|f| f.0);
-    let best = found.iter().rposition(|f| f.3.as_ref().is_some_and(|p| p.fit == hub::Fit::Fits));
-    Ok(Json(
-        found
-            .into_iter()
-            .enumerate()
-            .map(|(k, (_, repo, about, pick, vision))| {
-                json!({ "repo": repo, "about": about, "pick": pick, "vision": vision, "best": Some(k) == best })
-            })
-            .collect(),
-    ))
+    Ok(Json(picks))
 }
 
 #[derive(Deserialize)]
@@ -282,7 +268,7 @@ struct HubQuery {
 async fn hub_search(State(s): S, Query(q): Query<HubQuery>) -> ApiResult<Json<Vec<hub::Repo>>> {
     let q = q.q.unwrap_or_default();
     if q.trim().is_empty() || q.len() > 200 {
-        return Err(bad(anyhow::anyhow!("busca vazia ou longa demais")));
+        return Err(bad(anyhow::anyhow!("the search is empty or too long")));
     }
     Ok(Json(hub::search(&s.lair.http, q.trim()).await.map_err(bad_gateway)?))
 }
@@ -291,11 +277,11 @@ async fn hub_files(State(s): S, Query(q): Query<HubQuery>) -> ApiResult<Json<Val
     let repo = q.repo.unwrap_or_default();
     hub::check_repo(&repo).map_err(bad)?;
     let files = hub::judged(&s.lair, &repo).await.map_err(bad_gateway)?;
-    let pick = hub::recommend(&files, &hub::hardware()).map(|f| f.name.clone());
+    let pick = hub::recommend(&files, &crate::hw::hardware()).map(|f| f.name.clone());
     Ok(Json(json!({ "files": files, "pick": pick })))
 }
 
-async fn hub_downloads(State(s): S) -> Json<Vec<hub::Progress>> {
+async fn hub_downloads(State(s): S) -> Json<Vec<download::Progress>> {
     Json(s.lair.downloads.list())
 }
 
@@ -305,18 +291,77 @@ struct DownloadRequest {
     file: String,
 }
 
+/// Starts a download, or continues one that stopped: what was already fetched is kept.
 async fn hub_download(State(s): S, Json(r): Json<DownloadRequest>) -> ApiResult<StatusCode> {
     hub::check_repo(&r.repo).map_err(bad)?;
-    hub::start(s.lair.clone(), r.repo, r.file).await.map_err(bad)?;
+    download::start(s.lair.clone(), r.repo, r.file).await.map_err(bad)?;
     // Started, not done: progress is polled from GET /hub/downloads.
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn hub_cancel(State(s): S, Path(file): Path<String>) -> ApiResult<StatusCode> {
-    match s.lair.downloads.cancel(&file, s.lair.models.dir()) {
+async fn hub_cancel(State(s): S, Query(r): Query<DownloadRequest>) -> ApiResult<StatusCode> {
+    match s.lair.downloads.cancel(&r.repo, &r.file) {
         true => Ok(StatusCode::NO_CONTENT),
         false => Err(missing("no download with that name")),
     }
+}
+
+/// This machine's models and the ones in memory right now.
+async fn models(State(s): S) -> Json<Value> {
+    Json(json!({ "models": s.lair.models.local(), "loaded": s.lair.models.ps() }))
+}
+
+/// Deletes an installed model's files. Shared with the Ollama-style API. Only models in lair's own
+/// folder: the path comes from the catalog, never from the request.
+pub async fn delete_model(lair: &crate::lair::Lair, id: &str) -> ApiResult<u64> {
+    let path = lair.models.path(id).ok_or_else(|| missing(format!("model {id} not found")))?;
+    let dir = lair.models.dir().ok_or_else(|| bad(anyhow::anyhow!("no models folder to delete from")))?.to_owned();
+    // Out of memory first: Windows refuses to delete a file that is mapped.
+    lair.models.unload(id);
+    let freed = tokio::task::spawn_blocking(move || download::remove(&dir, &path)).await?.map_err(bad)?;
+    lair.models.refresh().await;
+    Ok(freed)
+}
+
+async fn remove_model(State(s): S, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({ "freed": delete_model(&s.lair, &id).await? })))
+}
+
+async fn load_model(State(s): S, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    s.lair.models.load(&id).await.map_err(bad)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unload_model(State(s): S, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    match s.lair.models.unload(&id) {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(missing(format!("model {id} is not in memory"))),
+    }
+}
+
+/// What memory holds, and what it needs to search by meaning.
+async fn memory(State(s): S) -> ApiResult<Json<Value>> {
+    let model = s.lair.models.embedder();
+    let (pieces, embedded) = s.lair.store.chunk_counts(model.as_deref())?;
+    Ok(Json(json!({
+        "enabled": s.lair.config().memory(),
+        "pieces": pieces,
+        "embedded": embedded,
+        "model": model,
+        "suggested": { "repo": mem::EMBED_REPO, "file": mem::EMBED_FILE },
+    })))
+}
+
+/// Forgets everything; chats and files are indexed again from scratch (unless memory is off).
+async fn forget(State(s): S) -> ApiResult<StatusCode> {
+    s.lair.store.clear_chunks()?;
+    s.lair.store.save_kv("memory.chat", &json!(0))?;
+    s.lair.memory.wake();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn memory_search(State(s): S, Query(q): Query<SearchQuery>) -> ApiResult<Json<Vec<mem::Hit>>> {
+    Ok(Json(mem::recall(&s.lair, &q.q, None, 10).await?))
 }
 
 /// Hugging Face failed or answered something unexpected: not the client's fault.

@@ -18,6 +18,8 @@ use crate::engine::{Event, Finish, Msg, Params, Reasoning, with_system};
 use crate::lair::Lair;
 use crate::store::{Message, Named, Ref, Settings, ToolStatus, ToolStep};
 
+/// Characters of remembered chats and files put before a question.
+const MEMORY_CHARS: usize = 3000;
 /// Characters of a referenced conversation copied into the prompt (its most recent part).
 const REF_CHARS: usize = 4500;
 
@@ -67,11 +69,23 @@ pub enum Out {
         status: ToolStatus,
         output: String,
     },
+    /// Earlier chats and files lair put before the question because they relate to it.
+    Recalled {
+        notes: Vec<crate::memory::Hit>,
+    },
+    /// lair chose the model for this turn (`auto`), and why.
+    Model {
+        id: String,
+        why: String,
+    },
     Done {
         message: i64,
         finish_reason: Finish,
         /// Prompt and reply tokens of the last generation: how full the context is.
         tokens: usize,
+        /// The model that answered, and its tokens per second in the last generation (0 if too short to tell).
+        model: String,
+        tps: f32,
     },
     Error {
         message: String,
@@ -86,6 +100,8 @@ pub async fn run(lair: Arc<Lair>, conv: String, input: Input, out: mpsc::Unbound
     if let Err(e) = run_inner(&lair, &conv, input, &out).await {
         let _ = out.send(Out::Error { message: format!("{e:#}") });
     }
+    // What was just said is worth remembering.
+    lair.memory.wake();
     if *lair.stopping.borrow() {
         let _ = out.send(Out::Stopped {});
     }
@@ -102,7 +118,6 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     let Some(c) = lair.store.update(conv, settings)? else {
         bail!("conversation {conv} not found");
     };
-    let model = c.model.filter(|m| lair.models.contains(m)).unwrap_or_else(|| lair.models.default_id());
     let mut params = lair.params();
     if let Some(e) = c.effort {
         params.reasoning = e;
@@ -124,6 +139,16 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
             Content::Image(path) => images.push(path.clone()),
         }
     }
+    // A model the conversation remembers may be gone (deleted, or its node offline): fall back to a local one.
+    let named = c.model.as_deref().and_then(|m| lair.models.resolve(Some(m), !images.is_empty()).ok());
+    let route = match named {
+        Some(route) => route,
+        None => lair.models.resolve(None, !images.is_empty()).map_err(anyhow::Error::msg)?,
+    };
+    let model = route.id;
+    if let Some(why) = route.why.filter(|_| c.model.as_deref() == Some(crate::models::AUTO)) {
+        let _ = out.send(Out::Model { id: model.clone(), why });
+    }
     if !images.is_empty() && !lair.models.sees_images(&model) {
         bail!("model {model} can't see images; pick a local vision model (with its mmproj next to the .gguf)");
     }
@@ -144,9 +169,20 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     if !docs.is_empty() {
         last.content = format!("{}{}", attach::sections(&docs), last.content);
     }
+    if let Some((notes, used)) = crate::memory::context(lair, &input.content, conv, MEMORY_CHARS).await {
+        // The cited chats and attachments already introduce the question themselves.
+        let lead = if refs.is_empty() && docs.is_empty() { "Current question: " } else { "" };
+        last.content = format!("{notes}{lead}{}", last.content);
+        let _ = out.send(Out::Recalled { notes: used });
+    }
     // shortcut: only the current question carries its images; earlier ones stay out to fit the context.
     last.images = images;
-    trim(&mut history, lair.history_chars);
+    // ~3 characters per token; half the context for history, half for the reply.
+    let ctx = match lair.models.ctx(&model) {
+        0 => 8192,
+        n => n as usize,
+    };
+    trim(&mut history, ctx * 3 / 2);
     let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history, lair.assets.ids());
     if c.agent {
         prompt = with_system(&prompt, &tools::system_prompt());
@@ -155,9 +191,9 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
         let _ = out.send(Out::Skill(s.clone()));
     }
 
-    let mut step = Step { lair, conv, out, skill, tokens: 0, sources: 0 };
+    let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model: model.clone(), sources: 0 };
     for _ in 0..agent::MAX_STEPS {
-        match step.generate(&model, prompt.clone(), params, c.agent).await? {
+        match step.generate(&model, prompt.clone(), params.clone(), c.agent).await? {
             Err(Gone) => return Ok(()),
             Ok(Generated { text, reasoning, call: None, finish }) => return step.finish(text, reasoning, finish),
             Ok(Generated { text, reasoning, call: Some((raw, call)), .. }) => {
@@ -197,8 +233,10 @@ struct Step<'a> {
     conv: &'a str,
     out: &'a mpsc::UnboundedSender<Out>,
     skill: Option<Named>,
-    /// Context used by the last generation.
+    /// Context used by the last generation, and its speed.
     tokens: usize,
+    tps: f32,
+    model: String,
     /// Web results numbered so far, for citations.
     sources: usize,
 }
@@ -241,6 +279,7 @@ impl Step<'_> {
                 Event::Done(done) => {
                     finish = done.finish_reason;
                     self.tokens = done.prompt_tokens + done.completion_tokens;
+                    self.tps = done.tps();
                     split.finish().into_iter().collect()
                 }
                 Event::Failed { message } => bail!(message),
@@ -251,7 +290,11 @@ impl Step<'_> {
                         text.push_str(&t);
                         gone |= self.out.send(Out::Answer { text: t }).is_err();
                     }
-                    Piece::Call { raw, parsed } => call = Some((raw, parsed)),
+                    // One tool per step: what the model wrote after its first call is dropped.
+                    Piece::Call { raw, parsed } => {
+                        call = Some((raw, parsed));
+                        break;
+                    }
                 }
             }
             if gone || call.is_some() {
@@ -297,7 +340,7 @@ impl Step<'_> {
         let (status, output) = match (call, spec) {
             (Err(e), _) => (
                 ToolStatus::Error,
-                format!("{e}. Use o formato <tool_call>{{\"name\": ..., \"arguments\": {{...}}}}</tool_call>."),
+                format!("{e}. Use the format <tool_call>{{\"name\": ..., \"arguments\": {{...}}}}</tool_call>."),
             ),
             (Ok(_), None) => (ToolStatus::Error, format!("tool {name} does not exist")),
             (Ok(_), Some(spec)) => {
@@ -334,7 +377,13 @@ impl Step<'_> {
 
     fn finish(&mut self, text: String, reasoning: Option<String>, finish: Finish) -> Result<()> {
         let message = self.save(text, reasoning)?;
-        let _ = self.out.send(Out::Done { message, finish_reason: finish, tokens: self.tokens });
+        let _ = self.out.send(Out::Done {
+            message,
+            finish_reason: finish,
+            tokens: self.tokens,
+            model: self.model.clone(),
+            tps: self.tps,
+        });
         Ok(())
     }
 
@@ -384,7 +433,7 @@ fn reference_context(lair: &Lair, refs: &[Ref]) -> Result<String> {
         let start = transcript.char_indices().rev().nth(REF_CHARS).map_or(0, |(i, _)| i);
         out.push_str(&format!("<chat title=\"{}\">\n{}</chat>\n\n", r.title, &transcript[start..]));
     }
-    out.push_str("Pergunta atual: ");
+    out.push_str("Current question: ");
     Ok(out)
 }
 

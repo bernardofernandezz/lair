@@ -1,12 +1,35 @@
 import { pick } from "./i18n";
 
 const T = pick({
-  en: { badToken: "That token doesn't open this server.", lost: "the connection dropped" },
-  pt: { badToken: "Esse token não abre este servidor.", lost: "a conexão caiu" },
+  en: { badToken: "That token doesn't open this server.", lost: "the connection dropped", answered: (s: number) => `The server answered ${s}.` },
+  pt: { badToken: "Esse token não abre este servidor.", lost: "a conexão caiu", answered: (s: number) => `O servidor respondeu ${s}.` },
 });
 /** `node` is the peer machine the model runs on; absent for this one. */
-/** `size` is the file's bytes and `ctx` the context it runs with; both 0 from older peers. */
-export type ModelInfo = { id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean; size?: number; ctx?: number };
+/**
+ * `size` is the file's bytes and `ctx` the context it runs with. `quant`, `family` and `params` come from
+ * the GGUF itself; `tps` is tokens per second here (`measured` on this very model, else estimated from
+ * others). All absent or zero from older peers.
+ */
+export type ModelInfo = {
+  id: string; node?: string | null; thinks: boolean; loaded: boolean; vision?: boolean; size?: number; ctx?: number;
+  quant?: string; family?: string; params?: number; embedding?: boolean; tps?: number; measured?: boolean;
+};
+
+/** The model id that lets lair choose per request. */
+export const AUTO = "auto";
+
+/**
+ * The models a chat can pick: embedding models are left out, and `auto` comes first, standing for
+ * whatever lair would choose (so it thinks or sees if any model does).
+ */
+export function chatModels(all: ModelInfo[]): ModelInfo[] {
+  const chat = all.filter((m) => !m.embedding);
+  const auto: ModelInfo = { id: AUTO, thinks: chat.some((m) => m.thinks), loaded: false, vision: chat.some((m) => m.vision && !m.node) };
+  return [auto, ...chat];
+}
+
+/** A model in memory on this machine. */
+export type LoadedModel = { id: string; ctx: number; gpu_layers: number; layers: number; size: number; busy: boolean; expires_in?: number };
 
 /** A model's own name: a peer's models are listed as `name@node`. */
 export const modelName = (m: ModelInfo) => (m.node ? m.id.slice(0, -(m.node.length + 1)) : m.id);
@@ -72,15 +95,30 @@ export type IndexEntry = { id: string; name: string; description: string; url: s
 
 /** How a model file compares with this machine: all on the GPU (or RAM), partly on the CPU, or not at all. */
 export type Fit = "fits" | "tight" | "no";
-export type Hardware = { gpus: string[]; vram: number; ram: number };
-export type HubFile = { name: string; size: number; mmproj: boolean; fit: Fit; installed: boolean };
+export type Gpu = { name: string; total: number; free: number };
+export type Hardware = {
+  cpu: string; cores: number; ram: number; ram_free: number; gpus: Gpu[]; vram: number; vram_free: number;
+  backend: "cuda" | "vulkan" | "metal" | "cpu"; wsl: boolean;
+};
+/** `parts` is how many files it downloads as; `tps` the tokens per second it should reach here, once something ran to estimate from. */
+export type HubFile = { name: string; size: number; mmproj: boolean; fit: Fit; installed: boolean; parts?: number; tps?: number };
 export type HubRepo = { id: string; downloads: number; likes: number };
-/** A curated repo with the file recommended for this machine; `best` is the most capable that fits. */
-export type Suggestion = { repo: string; about: string; pick: HubFile | null; vision: boolean; best: boolean };
-export type Download = { repo: string; file: string; done: number; total: number; finished: boolean; error?: string };
+/** Why a suggestion is listed where it is. */
+export type Why = "fits" | "tight" | "fast" | "slow" | "trusted" | "trending" | "gated" | "low_quant";
+/** A repo with the file recommended for this machine; `best` is the one to get. `about` is set for the repos lair curates. */
+export type Suggestion = {
+  repo: string; about: string; pick: HubFile | null; vision: boolean; thinks: boolean; params: number;
+  downloads: number; likes: number; why: Why[]; best: boolean;
+};
+/** `verifying`: every byte is here and being checked against the published hash. A failed one resumes when started again. */
+export type Download = { repo: string; file: string; done: number; total: number; finished: boolean; verifying?: boolean; error?: string };
+/** Something memory found: a piece of a chat or of a workspace file. */
+export type MemoryHit = { source: "chat" | "file"; ref: string; title: string; text: string; similarity?: number };
+/** What memory holds; `model` is the embedding model in use, `suggested` the one to download when there is none. */
+export type MemoryStatus = { enabled: boolean; pieces: number; embedded: number; model: string | null; suggested: { repo: string; file: string } };
 
 /** Who a node on the tailnet says it is. */
-export type NodeInfo = { name: string; version: string; models: ModelInfo[] };
+export type NodeInfo = { name: string; version: string; models: ModelInfo[]; active?: number };
 
 /** Runtime settings. The command line and the UI write the same shape; a flag wins over what was saved. */
 export type Config = Partial<{
@@ -90,6 +128,9 @@ export type Config = Partial<{
   peers: string[];
   reasoning: Effort;
   trustTailnet: boolean;
+  /** Write-only: the server answers `true` in its place once one is saved. */
+  hfToken: string | boolean;
+  memory: boolean;
 }>;
 export type Settings = {
   saved: Config;
@@ -118,7 +159,9 @@ export type TurnEvent =
   | { event: "answer"; data: { text: string } }
   | { event: "tool_call"; data: ToolCall }
   | { event: "tool_result"; data: ToolResult }
-  | { event: "done"; data: { message: number; finish_reason: "stop" | "length"; tokens?: number } };
+  | { event: "model"; data: { id: string; why: string } }
+  | { event: "recalled"; data: { notes: MemoryHit[] } }
+  | { event: "done"; data: { message: number; finish_reason: "stop" | "length"; tokens?: number; model?: string; tps?: number } };
 
 export class AuthError extends Error {}
 
@@ -129,7 +172,7 @@ async function check(r: Response): Promise<Response> {
   if (r.status === 401) throw new AuthError(T.badToken);
   if (!r.ok) {
     const body = await r.json().catch(() => null);
-    throw new Error(body?.error?.message ?? `O servidor respondeu ${r.status}.`);
+    throw new Error(body?.error?.message ?? T.answered(r.status));
   }
   return r;
 }
@@ -176,7 +219,15 @@ export function client(token: string) {
 
   return {
     /** Throws AuthError when the token is missing or wrong. */
-    models: async (): Promise<ModelInfo[]> => (await get<{ data: ModelInfo[] }>("/v1/models")).data,
+    models: async (): Promise<ModelInfo[]> => chatModels((await get<{ data: ModelInfo[] }>("/v1/models")).data),
+    /** This machine's models, embedding ones included, and which are in memory. */
+    localModels: () => get<{ models: ModelInfo[]; loaded: LoadedModel[] }>("/lair/v1/models"),
+    /** Deletes a model's files; answers the bytes freed. */
+    removeModel: (id: string) => send<{ freed: number }>("DELETE", `/lair/v1/models/${encodeURIComponent(id)}`),
+    unloadModel: (id: string) => send<void>("POST", `/lair/v1/models/${encodeURIComponent(id)}/unload`),
+    memory: () => get<MemoryStatus>("/lair/v1/memory"),
+    /** Forgets everything; chats and files are indexed again from scratch. */
+    clearMemory: () => send<void>("DELETE", "/lair/v1/memory"),
     /**
      * Trades the token for the HttpOnly `lair_asset` cookie.
      * GLTF textures are loaded by `<img>`, which cannot send an Authorization header.
@@ -210,8 +261,9 @@ export function client(token: string) {
     hubFiles: (repo: string) => get<{ files: HubFile[]; pick: string | null }>(`/lair/v1/hub/files?repo=${encodeURIComponent(repo)}`),
     downloads: () => get<Download[]>("/lair/v1/hub/downloads"),
     download: (repo: string, file: string) => send<void>("POST", "/lair/v1/hub/downloads", { repo, file }),
-    /** Cancels a running download, or dismisses a finished or failed one. */
-    cancelDownload: (file: string) => send<void>("DELETE", `/lair/v1/hub/downloads/${encodeURIComponent(file)}`),
+    /** Cancels a running download (deleting what it fetched), or dismisses a finished or failed one. */
+    cancelDownload: (repo: string, file: string) =>
+      send<void>("DELETE", `/lair/v1/hub/downloads?repo=${encodeURIComponent(repo)}&file=${encodeURIComponent(file)}`),
 
     settings: () => get<Settings>("/lair/v1/settings"),
     /** Changes the named settings; `""` clears one, the others stay. */
@@ -244,7 +296,7 @@ export function client(token: string) {
         for (const { event, data } of frames) {
           const d = JSON.parse(data);
           if (event === "error") throw new Error(d.message);
-          if (event === "stopped") throw new ConnectionLost("o servidor parou");
+          if (event === "stopped") throw new ConnectionLost("the server stopped");
           on({ event, data: d } as TurnEvent);
         }
       }

@@ -1,6 +1,6 @@
 [package]
 name = "lair"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
@@ -27,3 +27,7 @@ zip = { version = "9.5.0", default-features = false, features = ["deflate"] }
 cuda = ["llama-cpp-2/cuda"]
 vulkan = ["llama-cpp-2/vulkan"]
 metal = ["llama-cpp-2/metal"]
+
+[dev-dependencies]
+# Drives the router in tests without a socket; already in the tree through axum.
+tower = { version = "0.5", features = ["util"] }

@@ -28,6 +28,12 @@ pub struct Config {
     /// Machines of this tailnet skip the token; unset means yes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust_tailnet: Option<bool>,
+    /// Hugging Face token, for gated or private models. Sent to huggingface.co only; never shown again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hf_token: Option<String>,
+    /// Chats recall related past conversations and workspace files; unset means yes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<bool>,
 }
 
 impl Config {
@@ -42,6 +48,8 @@ impl Config {
             peers,
             reasoning: self.reasoning.or(saved.reasoning),
             trust_tailnet: self.trust_tailnet.or(saved.trust_tailnet),
+            hf_token: self.hf_token.clone().or_else(|| saved.hf_token.clone()),
+            memory: self.memory.or(saved.memory),
         }
     }
 
@@ -49,7 +57,8 @@ impl Config {
     pub fn patched(&self, change: Value) -> Result<Config> {
         let mut doc = serde_json::to_value(self)?;
         if let (Value::Object(doc), Value::Object(change)) = (&mut doc, change) {
-            doc.extend(change);
+            // The UI is shown `true` in place of a saved token; sending that back changes nothing.
+            doc.extend(change.into_iter().filter(|(k, v)| !(k == "hfToken" && v.is_boolean())));
             doc.retain(|_, v| !v.is_null());
         }
         serde_json::from_value::<Config>(doc)?.validated()
@@ -57,6 +66,19 @@ impl Config {
 
     pub fn trust_tailnet(&self) -> bool {
         self.trust_tailnet.unwrap_or(true)
+    }
+
+    pub fn memory(&self) -> bool {
+        self.memory.unwrap_or(true)
+    }
+
+    /// For showing: the token is replaced by `true`, so it never leaves the server again.
+    pub fn redacted(&self) -> Value {
+        let mut v = serde_json::to_value(self).unwrap_or_default();
+        if self.hf_token.is_some() {
+            v["hfToken"] = Value::Bool(true);
+        }
+        v
     }
 
     /// Trims every value, drops empty ones, and refuses what lair could not use.
@@ -86,12 +108,14 @@ impl Config {
             bail!("at most 64 peers");
         }
         Ok(Config {
-            searxng: url(self.searxng, "a URL do SearXNG")?,
+            searxng: url(self.searxng, "the SearXNG URL")?,
             skills_index: url(self.skills_index, "the skills index")?,
             name,
             peers,
             reasoning: self.reasoning,
             trust_tailnet: self.trust_tailnet,
+            hf_token: text(self.hf_token),
+            memory: self.memory,
         })
     }
 }

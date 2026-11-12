@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::engine::{Engine, Msg, Params, Part};
 
-pub fn run(engine: &mut Engine, model: &str, params: Params, system: Option<String>) -> Result<()> {
+pub fn run(engine: &Engine, model: &str, params: Params, system: Option<String>) -> Result<()> {
     let base: Vec<Msg> =
         system.map(|s| Msg { role: "system".into(), content: s, ..Default::default() }).into_iter().collect();
     let mut history = base.clone();
@@ -32,7 +32,7 @@ pub fn run(engine: &mut Engine, model: &str, params: Params, system: Option<Stri
 
         let mut reply = String::new();
         let mut in_thought = false;
-        let res = engine.generate(model, &history, params, |part| {
+        let res = engine.generate(model, &history, &params, |part| {
             match part {
                 Part::Thinking(t) => {
                     if !in_thought {
@@ -59,7 +59,12 @@ pub fn run(engine: &mut Engine, model: &str, params: Params, system: Option<Stri
         println!();
         match res {
             // Reasoning stays out of the history, as chat templates expect.
-            Ok(_) => history.push(Msg { role: "assistant".into(), content: reply, ..Default::default() }),
+            Ok(done) => {
+                if done.tps() > 0.0 {
+                    println!("{dim}{:.1} tokens/s{reset}", done.tps());
+                }
+                history.push(Msg { role: "assistant".into(), content: reply, ..Default::default() });
+            }
             Err(e) => {
                 eprintln!("error: {e:#}");
                 history.pop();

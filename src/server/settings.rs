@@ -22,8 +22,8 @@ async fn read(State(s): S) -> ApiResult<Json<Value>> {
     let peers = &lair.peers;
     let config = lair.config();
     Ok(Json(json!({
-        "saved": crate::lair::saved(&lair.store),
-        "flags": lair.flags,
+        "saved": crate::lair::saved(&lair.store).redacted(),
+        "flags": lair.flags.redacted(),
         "tailscale": { "socket": peers.has_socket(), "status": peers.status().await },
         "discovered": peers.found(),
         "system": {

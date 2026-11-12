@@ -28,11 +28,13 @@ pub struct Lair {
     pub workspace: PathBuf,
     pub approvals: Approvals,
     /// Models being downloaded from Hugging Face.
-    pub downloads: crate::hub::Downloads,
+    pub downloads: crate::download::Downloads,
+    /// What Hugging Face last said about the models worth offering.
+    pub hub: crate::hub::Cache,
+    /// Wakes the indexer that keeps conversations and workspace files searchable by meaning.
+    pub memory: crate::memory::Memory,
     /// Generation params from the command line; reasoning comes from [`Config`].
     pub params: Params,
-    /// Rough size, in characters, of the history a prompt may carry; the rest of the context is for the reply.
-    pub history_chars: usize,
     /// What the command line set; these settings can't be changed from the UI.
     pub flags: Config,
     /// The live settings: `flags` over what the UI saved. Changed only through [`Lair::save`].
@@ -58,7 +60,7 @@ impl Lair {
 
     /// Params for a generation that says nothing else.
     pub fn params(&self) -> Params {
-        Params { reasoning: self.config.read().unwrap().reasoning.unwrap_or_default(), ..self.params }
+        Params { reasoning: self.config.read().unwrap().reasoning.unwrap_or_default(), ..self.params.clone() }
     }
 
     pub fn node_name(&self) -> String {

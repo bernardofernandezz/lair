@@ -4,14 +4,15 @@
 
 **Your own AI on your own hardware.**
 
-One install, any GGUF model: web chat, terminal, agent, and the OpenAI and Ollama APIs your tools already speak.<br>
+One install, any GGUF model: lair reads your hardware, picks the best model for it on Hugging Face and tunes how it runs.<br>
+Web chat, terminal, agent, memory, and the OpenAI and Ollama APIs your tools already speak.<br>
 All your machines become one AI. Prompts, replies and models stay on hardware you own.
 
 [![Release](https://img.shields.io/github/v/release/bernardofernandezz/lair?style=flat-square)](https://github.com/bernardofernandezz/lair/releases)
 [![License](https://img.shields.io/github/license/bernardofernandezz/lair?style=flat-square)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows-555?style=flat-square)
 
-[Install](#install) · [Usage](#usage) · [Use it from other apps](#use-it-from-other-apps) · [Features](#features) · [Configuration](#configuration) · [Build from source](#build-from-source)
+[Install](#install) · [Usage](#usage) · [The right model](#the-right-model-for-your-machine) · [Use it from other apps](#use-it-from-other-apps) · [Features](#features) · [Configuration](#configuration) · [Build from source](#build-from-source)
 
 </div>
 
@@ -35,7 +36,7 @@ irm https://raw.githubusercontent.com/bernardofernandezz/lair/main/install.ps1 |
 lair serve
 ```
 
-Open http://localhost:8080 and start talking. The first run downloads a small reasoning model (Qwen3 4B, about 2.5 GB) so you have something to chat with right away.
+Open http://localhost:8080 and start talking. The first run looks at your hardware, asks Hugging Face which model runs best on it (6 GB at most; bigger ones are yours to choose) and downloads that one, so you have something to chat with right away. Offline, or if Hugging Face doesn't answer, it falls back to Qwen3 4B (about 2.5 GB).
 
 The installer puts `lair` in `~/.local/bin` (`%LOCALAPPDATA%\Programs\lair` on Windows) and doesn't need root. On Linux and Windows it picks the Vulkan build when a GPU driver is present (NVIDIA, AMD and Intel all work, no CUDA required) and the CPU build otherwise. Macs use Metal.
 
@@ -55,6 +56,8 @@ lair run              # chat in the terminal
 lair run llama        # ...with the model whose name contains "llama"
 lair pull <repo>      # download from Hugging Face: the file that fits this machine best
 lair list             # see what you have
+lair rm <name>        # delete a model
+lair bench            # measure how fast a model runs here
 lair update           # switch to the latest release
 ```
 
@@ -67,13 +70,24 @@ lair pull Qwen3-8B-GGUF                 # a bare name is searched on Hugging Fac
 lair pull https://example.com/m.gguf    # any .gguf link
 ```
 
-Vision models come with their projector (`mmproj`), so they can see images right away.
+Vision models come with their projector (`mmproj`), so they can see images right away. Downloads from Hugging Face are checked against the hash it publishes, an interrupted one continues where it stopped when you start it again, and models split into several files come down whole. Gated and private repos need a token: set `HF_TOKEN`, or save one in **Settings → General**.
+
+## The right model for your machine
+
+lair works out what to run and how, so you don't have to read model cards and count gigabytes.
+
+- **It reads the hardware.** CPU, cores, total and free RAM, each GPU with its total and free memory, and which backend generation runs on (CUDA, Vulkan, Metal or the CPU). **Settings → Models** shows what it found.
+- **It asks Hugging Face what is good right now.** The suggestions are not a fixed list: lair takes what is trending and most downloaded among GGUF repos, adds the ones it vouches for, and judges each against your machine. The **best pick** is the biggest model from a publisher lair trusts that runs fully on your machine, fast, at 4 bits or better; trending breaks ties. Every suggestion says why it is where it is.
+- **It tells you the speed before you download.** Once any model has run here, lair knows how fast this machine moves weights and estimates tokens per second for models you don't have yet (shown with a `~`). Each generation it measures makes the estimates better; `lair bench` measures on purpose. The estimate assumes speed follows model size, which holds for ordinary models and is off for mixture-of-experts ones (faster than estimated) and very small ones.
+- **It tunes each model.** How many layers go to the GPU and how much context a model gets are fitted per model to the memory that is free when it loads, from 8,192 tokens up to 32,768. `--gpu-layers`, `--ctx` and `--threads` override that for every model.
+- **It keeps several models in memory.** As many as fit. Different models answer at the same time; when a new one doesn't fit, the one idle longest makes room. **Settings → Models** shows what is loaded and lets you unload or delete.
+- **`auto` picks per message.** Choose **Auto** in the model picker (or send `"model": "auto"` to the API) and each request goes to the biggest model that is fast right now, on this machine or another of yours, taking into account what is already loaded and how busy each machine is. A message with images goes to a local model that sees. The reply says which model answered and why.
 
 ## Use it from other apps
 
 lair speaks two APIs on the same port, so most apps that run local models work with it unchanged.
 
-**Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/tags`, `/api/show` and `/api/version`.
+**Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete` and `/api/version`. `/api/pull` takes Hugging Face repos (`Qwen/Qwen3-4B-GGUF`, `hf.co/owner/repo:QUANT`), not names from Ollama's own library.
 
 ```bash
 curl localhost:8080/api/chat -d '{
@@ -82,7 +96,7 @@ curl localhost:8080/api/chat -d '{
 }'
 ```
 
-**Apps made for OpenAI:** set the base URL to `http://localhost:8080/v1` and any API key.
+**Apps made for OpenAI:** set the base URL to `http://localhost:8080/v1` and any API key. lair answers `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` and `/v1/models`.
 
 ```bash
 curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -93,7 +107,10 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
 
 Both accept `tools` (function calling) and images, which is what coding agents and chat front-ends rely on:
 
-- **Tools:** pass `tools` as usual and calls come back as `tool_calls`. Any model works: lair asks for calls in plain text and parses them, so it doesn't depend on the model's chat template supporting tools. One call per reply.
+- **Tools:** pass `tools` as usual and calls come back as `tool_calls`, several in one reply when the model makes several. Any model works: lair asks for calls in plain text and parses them, so it doesn't depend on the model's chat template supporting tools. `tool_choice` is honoured as an instruction to the model.
+- **Structured output:** `response_format` with `json_object` or a `json_schema` (OpenAI), or `format` (Ollama), constrains the answer to valid JSON matching the schema, token by token.
+- **Embeddings:** with an embedding model installed (lair suggests one in **Settings → General**), `/v1/embeddings` and `/api/embed` return vectors made on this machine.
+- **Sampling and stops:** `stop`, `top_k`, `min_p`, a repeat penalty and `seed` are honoured, and `stream_options.include_usage` adds token counts to a stream. Responses carry timings, tokens per second included.
 - **Images:** send them inline (`data:image/...;base64,` URLs in OpenAI's format, `images` in Ollama's) to a vision model. Links to images are refused, so the server never fetches anything a client points it at.
 - **Reasoning:** `reasoning_effort` (OpenAI) or `think` (Ollama) turns thinking off, light or deep, and it comes back in `reasoning_content` or `thinking`.
 
@@ -103,13 +120,16 @@ If you set `LAIR_TOKEN`, clients must send it as `Authorization: Bearer <token>`
 
 |  |  |
 | --- | --- |
-| **Any GGUF model** | Every `.gguf` in the folder shows up in the model picker. One stays in memory and picking another swaps it. |
+| **Any GGUF model** | Every `.gguf` in the folder shows up in the model picker. As many as fit stay in memory, and different ones answer at the same time. |
+| **The right model, tuned** | lair reads your hardware, ranks what is on Hugging Face for it, estimates each model's speed before you download, and fits GPU layers and context per model. |
+| **Auto** | One model id that picks, per message, the biggest model that is fast right now across your machines. |
+| **Memory** | Your chats and workspace files are indexed on your machine and found again by meaning. |
 | **Reasoning you control** | Models that think before answering get three modes: off, light or deep. The thinking is kept apart from the answer, in the UI and in the API. |
 | **Conversations that stay** | Saved on the server in SQLite, searchable, and citable from another chat with `@`. |
 | **Agent mode** | The model reads and writes files, runs commands, searches the web and digs through past chats. You approve each risky step. |
 | **Skills** | Prompt packages that kick in on trigger words. Write them in the UI or install them from a URL. |
 | **Your machines, one network** | lair nodes on your Tailscale network find each other and share their models. |
-| **Works with your tools** | OpenAI (`/v1`) and Ollama (`/api`) compatible, with streaming, tool calling and images. |
+| **Works with your tools** | OpenAI (`/v1`) and Ollama (`/api`) compatible, with streaming, tool calling, images, structured output and embeddings. |
 
 ### Agent mode
 
@@ -122,6 +142,7 @@ Switch on **Agent** in the composer and the model can act instead of only writin
 | `run_command` | Run a shell command in the workspace (60 s limit) | ✓ |
 | `web_search`, `fetch_url` | Search through your SearXNG, read a page | ✓ |
 | `search_conversations`, `read_conversation` | Look through saved conversations | |
+| `search_memory` | Find passages of past chats and workspace files by meaning | |
 
 Before a tool changes something or goes online, lair shows the exact arguments and waits for you to allow it once, allow it for the rest of the conversation, or deny it. File paths can't leave the workspace (`<data>/workspace` by default).
 
@@ -147,6 +168,16 @@ The API returns the thinking in `reasoning_content` and the answer in `content`,
 ### Conversations
 
 Chats are stored on the server, so they follow you to any device that opens lair. The sidebar searches them by title and content. Type `@` in a message to cite another conversation: its latest part goes into the prompt as quoted context.
+
+### Memory
+
+lair keeps an index of your chats and of the documents in the agent's workspace (text, code, Markdown, PDFs), on your machine, in the same SQLite file as the conversations. Only what changed is read again.
+
+- **By words, always.** The agent's `search_memory` tool finds passages that share words with a question.
+- **By meaning, with an embedding model.** **Settings → General** offers to download one (bge-m3, 0.4 GB, multilingual). Passages are then also found when they say the same thing in other words, and a chat is shown the passages clearly related to your question before it answers. The chat tells you when it did, and from which chat or file.
+- **Yours to control.** Turn memory off, or make it forget everything, in **Settings → General**. Deleting a conversation removes it from memory.
+
+What memory recalls goes into the prompt as information, with the same warning lair puts on cited chats. A page the agent saved to the workspace can still come back in a later chat, so the agent's approvals stay as they are.
 
 ### Skills
 
@@ -196,11 +227,12 @@ Nodes talk through lair's own API (`/lair/v1/node`, `/lair/v1/generate`) over th
 | --- | --- | --- |
 | `LAIR_TOKEN` | unset | Require this token on the UI and API |
 | `LAIR_DATA` | `~/.local/share/lair`, `%LOCALAPPDATA%\lair` on Windows | Conversations, skills and the agent's workspace |
-| `LAIR_DEFAULT_MODEL` | Qwen3 4B | `.gguf` URL fetched when there are no models; `""` turns it off |
+| `LAIR_DEFAULT_MODEL` | `auto` | What a first run downloads when there are no models: `auto` picks the best for this machine, a `.gguf` URL names one, `""` turns it off |
+| `HF_TOKEN` | unset | Hugging Face token, for gated or private models |
 | `LAIR_SEARXNG` | unset | SearXNG URL for the agent's web search |
 | `LAIR_PEERS` | unset | Extra lair nodes, as `host:port`, comma-separated |
 
-Flags only: `--port` (8080), `--host` (127.0.0.1), `--ctx` (8192 tokens), `--gpu-layers` (99, `0` for CPU only), `--reasoning` (`high`).
+Flags only: `--port` (8080), `--host` (127.0.0.1), `--reasoning` (`high`), and three that are fitted per model unless you set them: `--ctx` (context in tokens), `--gpu-layers` (`0` for CPU only) and `--threads`.
 
 lair listens on localhost only by default. To reach it from other devices, set `LAIR_TOKEN`, bind it with `--host 0.0.0.0` and put HTTPS in front.
 
@@ -235,16 +267,21 @@ cargo build --release --features vulkan     # or cuda, metal, or nothing for CPU
 ./target/release/lair serve
 ```
 
-Tests run with `cargo test` and `cd web && bun test`. The test that loads a real model is skipped by default; set `LAIR_TEST_MODEL=/path/to/model.gguf` and run `cargo test -- --include-ignored`.
+Tests run with `cargo test` and `cd web && bun test`. The tests that load real models are skipped by default; set `LAIR_TEST_MODEL=/path/to/a-thinking-model.gguf` and `LAIR_TEST_EMBED_MODEL=/path/to/an-embedding-model.gguf`, and run `cargo test --release -- --include-ignored`.
 
 <details>
 <summary>Project layout</summary>
 
 ```
-src/engine.rs    local GGUF models: generation, reasoning modes, <think> splitting
-src/models.rs    every usable model, local or on a peer, behind one streaming generate
+src/engine.rs    local GGUF models: the pool in memory, per-model fitting, generation, embeddings
+src/models.rs    every usable model, local or on a peer, behind one streaming generate; `auto`
+src/hw.rs        what this machine has: CPU, memory, GPUs, backend
+src/hub.rs       Hugging Face: what is trending, what fits, which file to take
+src/download.rs  downloads that resume and are verified; removing models
+src/speed.rs     measured speeds, estimates for other models, the `auto` policy
+src/memory.rs    chats and workspace files indexed and found again by words and meaning
 src/peers.rs     other lair nodes on the tailnet: discovery, whois trust, remote generation
-src/store.rs     conversations in SQLite, with full-text search
+src/store.rs     conversations and memory in SQLite, with full-text search
 src/turn.rs      one conversation turn: history, references, skills, the agent loop
 src/agent/       tool-call protocol and parser, tools, approvals
 src/skills/      skill catalog, installs from URL, zip or GitHub, index

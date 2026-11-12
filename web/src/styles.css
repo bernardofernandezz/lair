@@ -2348,3 +2348,21 @@ a.ref-chip {
   padding: 6px 16px;
   font-size: 14px;
 }
+
+/* What lair did on its own in a turn: which model Auto chose, what memory recalled. */
+.turn-note {
+  margin: 4px auto 0;
+  max-width: 70ch;
+  text-align: center;
+  font-size: 13px;
+}
+
+.hw-panel {
+  display: grid;
+  gap: 6px;
+}
+
+.memory-card {
+  display: grid;
+  gap: 8px;
+}
