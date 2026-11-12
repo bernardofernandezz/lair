@@ -34,7 +34,7 @@ pub struct Call {
 #[derive(Debug, PartialEq)]
 pub enum Piece {
     Text(String),
-    /// A complete call; generation should stop here. `raw` is exactly what the model wrote, which is
+    /// A complete call. `raw` is exactly what the model wrote, which is
     /// what goes back into its history so later turns see calls in the model's own format.
     Call {
         raw: String,
@@ -48,8 +48,8 @@ enum Syntax {
     Python,
 }
 
-/// Splits streamed answer text into plain text and the first tool call, even when the call's opening
-/// is split across tokens.
+/// Splits streamed answer text into plain text and tool calls, even when a call's opening is split
+/// across tokens. Text after a call is still text: the caller decides whether the reply ends there.
 pub struct CallSplit {
     /// Text that starts a call. Pythonic openings name a known tool, so `[a link](…)` stays text.
     openers: Vec<(String, Syntax)>,
@@ -73,13 +73,20 @@ impl CallSplit {
                     let Some(end) = self.pending.find(CLOSE) else { return out };
                     let body = &self.pending[..end];
                     out.push(Piece::Call { raw: format!("{OPEN}{body}{CLOSE}"), parsed: parse_json(body) });
-                    return self.done(out);
+                    self.pending.drain(..end + CLOSE.len());
+                    self.inside = None;
+                    continue;
                 }
                 Some(Syntax::Python) => {
                     let Some(end) = python_end(&self.pending) else { return out };
                     let body = &self.pending[..end];
                     out.push(Piece::Call { raw: format!("[{body}]"), parsed: parse_python(body) });
-                    return self.done(out);
+                    self.pending.drain(..end);
+                    if self.pending.starts_with(']') {
+                        self.pending.remove(0);
+                    }
+                    self.inside = None;
+                    continue;
                 }
                 None => {}
             }
@@ -107,12 +114,6 @@ impl CallSplit {
                 }
             }
         }
-    }
-
-    fn done(&mut self, out: Vec<Piece>) -> Vec<Piece> {
-        self.pending.clear();
-        self.inside = None;
-        out
     }
 
     /// Called when generation ended: an unclosed call is still tried (models often stop right before closing it).
@@ -170,7 +171,7 @@ fn python_end(s: &str) -> Option<usize> {
 /// Parses `name(key='value', n=2, flag=True)` into a call with JSON arguments.
 fn parse_python(src: &str) -> Result<Call, String> {
     let err = |why: &str| format!("invalid call ({why}): {src}");
-    let open = src.find('(').ok_or_else(|| err("faltou '('"))?;
+    let open = src.find('(').ok_or_else(|| err("missing '('"))?;
     let body = src[open + 1..].trim_end().strip_suffix(')').unwrap_or(&src[open + 1..]);
     let mut p = Py { s: body.chars().collect(), i: 0 };
     let mut args = Map::new();
@@ -182,7 +183,7 @@ fn parse_python(src: &str) -> Result<Call, String> {
         let key: String = p.take_while(|c| c.is_alphanumeric() || c == '_');
         p.ws();
         if key.is_empty() || !p.eat('=') {
-            return Err(err("use argumento=valor"));
+            return Err(err("use argument=value"));
         }
         args.insert(key, p.value().map_err(|w| err(&w))?);
         p.ws();
@@ -224,7 +225,7 @@ impl Py {
     }
     fn value(&mut self) -> Result<Value, String> {
         self.ws();
-        match self.peek().ok_or("faltou o valor")? {
+        match self.peek().ok_or("missing value")? {
             q @ ('\'' | '"') => {
                 self.i += 1;
                 let mut out = String::new();
@@ -233,7 +234,7 @@ impl Py {
                     self.i += 1;
                     match c {
                         '\\' => {
-                            let e = self.peek().ok_or("escape incompleto")?;
+                            let e = self.peek().ok_or("incomplete escape")?;
                             self.i += 1;
                             out.push(match e {
                                 'n' => '\n',
@@ -270,7 +271,7 @@ impl Py {
                         .ok()
                         .and_then(serde_json::Number::from_f64)
                         .map(Value::Number)
-                        .ok_or(format!("valor desconhecido {w:?}")),
+                        .ok_or(format!("unknown value {w:?}")),
                 }
             }
         }

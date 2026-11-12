@@ -96,3 +96,35 @@ test("bareName drops a trailing quantization only", () => {
   expect(bareName("gemma-3-4b-it-q8_0")).toBe("gemma-3-4b-it");
   expect(bareName("Qwen3-4B")).toBe("Qwen3-4B");
 });
+
+import { AUTO, chatModels } from "./api";
+import { displayName, speedLabel } from "./Controls";
+import { reasonLine } from "./settings/ModelsTab";
+
+test("chatModels leaves embedding models out and puts Auto first", () => {
+  const models = chatModels([
+    { id: "qwen", thinks: true, loaded: true },
+    { id: "bge-m3", thinks: false, loaded: false, embedding: true },
+    { id: "eyes@doom", node: "doom", thinks: false, loaded: false, vision: true },
+  ]);
+  expect(models.map((m) => m.id)).toEqual([AUTO, "qwen", "eyes@doom"]);
+  expect(models[0].thinks).toBe(true);
+  expect(models[0].vision).toBe(false); // images never leave this machine, and no local model sees them
+  expect(chatModels([]).map((m) => m.id)).toEqual([AUTO]);
+  expect(displayName(models[0])).toBe("Auto");
+  expect(displayName({ id: "Qwen3-8B-Q4_K_M", thinks: true, loaded: false })).toBe("Qwen3-8B");
+});
+
+test("speedLabel marks an estimate and hides an unknown speed", () => {
+  expect(speedLabel(23.4, true)).toBe("23 tok/s");
+  expect(speedLabel(23.4)).toBe("~23 tok/s");
+  expect(speedLabel(4.26, true)).toBe("4.3 tok/s");
+  expect(speedLabel(0)).toBeNull();
+  expect(speedLabel(undefined)).toBeNull();
+});
+
+test("reasonLine words a suggestion's reasons in order", () => {
+  const words = { fits: "fits", tight: "tight", fast: "fast", slow: "slow", trusted: "trusted", trending: "trending", gated: "gated", low_quant: "low" };
+  expect(reasonLine(["trusted", "fits", "fast"], words)).toBe("trusted · fits · fast");
+  expect(reasonLine([], words)).toBe("");
+});

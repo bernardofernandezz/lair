@@ -26,6 +26,9 @@ pub struct NodeInfo {
     pub name: String,
     pub version: String,
     pub models: Vec<ModelEntry>,
+    /// Generations running or queued there; older nodes don't say.
+    #[serde(default)]
+    pub active: u32,
 }
 
 /// What `GET /settings` says about Tailscale on this machine.
@@ -167,6 +170,11 @@ impl Peers {
         if host.contains(':') { format!("http://{host}") } else { format!("http://{host}:{}", self.port) }
     }
 
+    /// Generations running on `node`, as it last said.
+    pub fn active(&self, node: &str) -> u32 {
+        self.nodes.read().unwrap().iter().find(|n| n.info.name == node).map_or(0, |n| n.info.active)
+    }
+
     /// Models on other nodes, named `model@node`.
     pub fn models(&self) -> Vec<ModelEntry> {
         self.nodes
@@ -273,20 +281,19 @@ mod tests {
         let info = NodeInfo {
             name: "doom".into(),
             version: "0.1.0".into(),
-            models: vec![ModelEntry {
-                id: "qwen".into(),
-                node: None,
-                thinks: true,
-                loaded: false,
-                vision: false,
-                size: 0,
-                ctx: 0,
-            }],
+            models: vec![ModelEntry { id: "qwen".into(), thinks: true, ..Default::default() }],
+            active: 2,
         };
         *p.nodes.write().unwrap() = vec![Node { info, base: "http://doom:8080".into() }];
         assert_eq!(p.models()[0].id, "qwen@doom");
         assert_eq!(p.locate("qwen@doom"), Some(("http://doom:8080".into(), "qwen".into())));
         assert_eq!(p.locate("other@doom"), None);
         assert_eq!(p.locate("qwen"), None);
+        assert_eq!((p.active("doom"), p.active("nowhere")), (2, 0));
+        let old: NodeInfo = serde_json::from_str(
+            r#"{"name":"old","version":"0.2.0","models":[{"id":"m","thinks":false,"loaded":true,"size":5,"ctx":8192}]}"#,
+        )
+        .unwrap();
+        assert_eq!((old.active, old.models[0].tps, old.models[0].ctx), (0, 0.0, 8192), "a 0.2 node still parses");
     }
 }

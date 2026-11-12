@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type FocusEvent, type KeyboardEvent } from "react";
-import { modelName, type Effort, type ModelInfo } from "./api";
+import { AUTO, modelName, type Effort, type ModelInfo } from "./api";
 import { pick } from "./i18n";
 
 const T = pick({
@@ -20,6 +20,11 @@ const T = pick({
     reasoning: "Reasoning",
     more: "Get more models…",
     used: (u: string, s: string) => `${u} of ${s} context tokens used`,
+    auto: "Auto",
+    autoHint: "lair picks per message: the biggest model that is fast right now, here or on your other machines",
+    speed: (t: string) => `${t} tok/s`,
+    measured: "Measured on this machine",
+    estimated: "Estimated from other models measured on this machine",
   },
   pt: {
     modes: [
@@ -38,6 +43,11 @@ const T = pick({
     reasoning: "Raciocínio",
     more: "Baixar mais modelos…",
     used: (u: string, s: string) => `${u} de ${s} tokens de contexto usados`,
+    auto: "Auto",
+    autoHint: "o lair escolhe a cada mensagem: o maior modelo que está rápido agora, aqui ou nas suas outras máquinas",
+    speed: (t: string) => `${t} tok/s`,
+    measured: "Medido nesta máquina",
+    estimated: "Estimado a partir de outros modelos medidos nesta máquina",
   },
 });
 
@@ -50,6 +60,14 @@ const QUANT = /(?:^|[-_.])(I?Q\d(?:_[KS0-9])?(?:_[A-Z0-9]+)?|BF16|F16|F32)(?=$|[
 
 /** The quantization in a GGUF file name, like `Q4_K_M`, or null. */
 export const quantOf = (id: string) => id.match(QUANT)?.[1].toUpperCase() ?? null;
+
+/** Tokens per second as a tag's text: `~23 tok/s` when estimated, `23 tok/s` when measured; null when unknown. */
+export const speedLabel = (tps: number | undefined, measured?: boolean) =>
+  tps && tps > 0 ? `${measured ? "" : "~"}${T.speed(tps < 10 ? tps.toFixed(1) : tps.toFixed(0))}` : null;
+export const speedHint = (measured?: boolean) => (measured ? T.measured : T.estimated);
+
+/** What a model is called on screen: its own name without the quantization, or "Auto". */
+export const displayName = (m: ModelInfo) => (m.id === AUTO ? T.auto : bareName(modelName(m)));
 
 /** The name without its quantization, which is shown apart as a tag. */
 export const bareName = (name: string) => {
@@ -126,7 +144,7 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
   }
 
   const mode = MODES.find((m) => m.value === effort);
-  const name = bareName(current ? modelName(current) : value);
+  const name = current ? displayName(current) : bareName(value);
   let index = 0;
 
   return (
@@ -163,7 +181,9 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
               ),
               ...ms.map((m) => {
                 const i = index++;
-                const quant = quantOf(modelName(m));
+                // The GGUF says its own quantization; names are the fallback for older peers.
+                const quant = m.quant || quantOf(modelName(m));
+                const speed = speedLabel(m.tps, m.measured);
                 return (
                   <li
                     key={m.id}
@@ -174,10 +194,17 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
                     onPointerEnter={() => setHi(i)}
                     onClick={() => pick(i)}
                   >
-                    <span className="option-name">{bareName(modelName(m))}</span>
+                    <span className="option-name" title={m.id === AUTO ? T.autoHint : undefined}>
+                      {displayName(m)}
+                    </span>
                     <span className="option-meta">
                       {quant && <span className="tag">{quant}</span>}
                       {m.size ? <span className="tag">{gb(m.size)}</span> : null}
+                      {speed && (
+                        <span className="tag" title={speedHint(m.measured)}>
+                          {speed}
+                        </span>
+                      )}
                       {m.thinks && <span className="tag">{T.thinks}</span>}
                       {m.vision && <span className="tag">{T.vision}</span>}
                       {m.loaded && <span className="tag is-on">{T.loaded}</span>}

@@ -29,6 +29,7 @@ pub enum Tool {
     WebSearch,
     FetchUrl,
     SearchConversations,
+    SearchMemory,
     ReadConversation,
     ListSkills,
     SaveSkill,
@@ -126,6 +127,14 @@ pub const SPECS: &[Spec] = &[
         needs_approval: false,
     },
     Spec {
+        tool: Tool::SearchMemory,
+        name: "search_memory",
+        label: "Search memory",
+        subject: "query",
+        usage: r#"finds passages of the user's earlier chats and workspace files related to a question, by meaning. {"query": "..."}"#,
+        needs_approval: false,
+    },
+    Spec {
         tool: Tool::ReadConversation,
         name: "read_conversation",
         label: "Read chat",
@@ -188,7 +197,7 @@ pub async fn run(lair: &Lair, tool: Tool, args: &Value, sources: &mut usize) -> 
         Tool::EditFile => edit_file(ws, req(args, "path")?, req(args, "find")?, str_arg(args, "replace").unwrap_or("")),
         Tool::DeleteFile => {
             std::fs::remove_file(jail::existing(ws, req(args, "path")?)?)?;
-            Ok("apagado".into())
+            Ok("deleted".into())
         }
         Tool::RunCommand => run_command(ws, req(args, "command")?).await,
         Tool::WebSearch => web_search(lair.config().searxng.as_deref(), &lair.http, req(args, "query")?, sources).await,
@@ -200,12 +209,12 @@ pub async fn run(lair: &Lair, tool: Tool, args: &Value, sources: &mut usize) -> 
                 .iter()
                 .map(|s| {
                     format!(
-                        "- {} ({}): {} [gatilhos: {}]{}",
+                        "- {} ({}): {} [triggers: {}]{}",
                         s.id,
                         s.name,
                         s.description,
                         s.when.join(", "),
-                        if s.enabled { "" } else { " (desligada)" }
+                        if s.enabled { "" } else { " (disabled)" }
                     )
                 })
                 .collect();
@@ -230,6 +239,13 @@ pub async fn run(lair: &Lair, tool: Tool, args: &Value, sources: &mut usize) -> 
         Tool::SearchConversations => {
             let hits = lair.store.search(req(args, "query")?)?;
             Ok(if hits.is_empty() { "no chats found".into() } else { serde_json::to_string_pretty(&hits)? })
+        }
+        Tool::SearchMemory => {
+            if !lair.config().memory() {
+                anyhow::bail!("memory is turned off in the settings");
+            }
+            let hits = crate::memory::recall(lair, req(args, "query")?, None, 6).await?;
+            Ok(if hits.is_empty() { "nothing related found".into() } else { serde_json::to_string_pretty(&hits)? })
         }
         Tool::ReadConversation => {
             let id = req(args, "id")?;
@@ -264,7 +280,7 @@ fn write_file(ws: &Path, path: &str, content: &str) -> Result<String> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&target, content)?;
-    Ok(format!("{path} gravado ({} bytes)", content.len()))
+    Ok(format!("{path} written ({} bytes)", content.len()))
 }
 
 fn edit_file(ws: &Path, path: &str, find: &str, replace: &str) -> Result<String> {
@@ -274,7 +290,7 @@ fn edit_file(ws: &Path, path: &str, find: &str, replace: &str) -> Result<String>
         0 => bail!("the text does not appear in {path}"),
         1 => {
             std::fs::write(&target, text.replacen(find, replace, 1))?;
-            Ok(format!("{path} editado"))
+            Ok(format!("{path} edited"))
         }
         n => bail!("the text appears {n} times in {path}; include more context so it is unique"),
     }
@@ -294,7 +310,7 @@ async fn run_command(ws: &Path, command: &str) -> Result<String> {
         .spawn()?;
     let out = tokio::time::timeout(COMMAND_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| anyhow::anyhow!("o comando passou de {} s e foi interrompido", COMMAND_TIMEOUT.as_secs()))??;
+        .map_err(|_| anyhow::anyhow!("the command ran past {} s and was stopped", COMMAND_TIMEOUT.as_secs()))??;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     let err = String::from_utf8_lossy(&out.stderr);
     if !err.trim().is_empty() {
@@ -371,14 +387,14 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn req<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-    str_arg(args, key).with_context(|| format!("falta o argumento \"{key}\" (texto)"))
+    str_arg(args, key).with_context(|| format!("missing argument \"{key}\" (text)"))
 }
 
 fn shorten(mut s: String) -> String {
     if let Some((i, _)) = s.char_indices().nth(MAX_OUTPUT) {
         let total = s.chars().count();
         s.truncate(i);
-        s.push_str(&format!("\n… (cortado: {total} caracteres no total)"));
+        s.push_str(&format!("\n… (cut: {total} characters in total)"));
     }
     s
 }
@@ -433,7 +449,7 @@ mod tests {
     #[test]
     fn long_output_is_cut_with_a_note() {
         let s = shorten("é".repeat(MAX_OUTPUT + 10));
-        assert!(s.ends_with(&format!("(cortado: {} caracteres no total)", MAX_OUTPUT + 10)));
+        assert!(s.ends_with(&format!("(cut: {} characters in total)", MAX_OUTPUT + 10)));
         assert_eq!(s.chars().filter(|&c| c == 'é').count(), MAX_OUTPUT);
         assert_eq!(shorten("curto".into()), "curto");
     }

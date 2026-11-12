@@ -38,7 +38,12 @@ mod tests {
         let events = [
             Event::Thinking { text: "hm".into() },
             Event::Answer { text: "Oi".into() },
-            Event::Done(Done { prompt_tokens: 3, completion_tokens: 2, finish_reason: Finish::Length }),
+            Event::Done(Done {
+                prompt_tokens: 3,
+                completion_tokens: 2,
+                finish_reason: Finish::Length,
+                ..Default::default()
+            }),
             Event::Failed { message: "boom".into() },
         ];
         for e in events {

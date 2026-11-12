@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AuthError, ConnectionLost, type Api, type Conversation, type Effort, type FileTypes, type ModelInfo, type Ref, type UploadedFile } from "./api";
+import { AUTO, AuthError, ConnectionLost, type Api, type Conversation, type Effort, type FileTypes, type MemoryHit, type ModelInfo, type Ref, type UploadedFile } from "./api";
 import { Composer, type Pending } from "./Composer";
-import { ContextMeter, isEffort, ModelChip } from "./Controls";
+import { ContextMeter, displayName, isEffort, ModelChip, speedLabel } from "./Controls";
 import { pulse, settle, typed, type OrbSignal } from "./Orb";
 import { load, save } from "./storage";
 import { Turns } from "./Turns";
@@ -17,6 +17,9 @@ const T = pick({
     hello: "Pick a model and ask anything. It all runs on this machine.",
     agentHint: "Lets the model use tools: workspace files, the shell, the web and your chats. Anything that changes something asks you first.",
     agent: "Agent",
+    chose: (m: string, why: string) => `Auto chose ${m}: ${why}.`,
+    recalled: (n: string) => `Recalled from ${n}`,
+    speedOf: (m: string) => `Speed of the last reply, by ${m}`,
   },
   pt: {
     failed: "Não foi possível responder: ",
@@ -26,6 +29,9 @@ const T = pick({
     hello: "Escolha um modelo e pergunte qualquer coisa. Tudo roda nesta máquina.",
     agentHint: "Deixa o modelo usar ferramentas: arquivos do workspace, shell, web e suas conversas. Ações que mudam algo pedem sua aprovação.",
     agent: "Agente",
+    chose: (m: string, why: string) => `O Auto escolheu ${m}: ${why}.`,
+    recalled: (n: string) => `Lembrado de ${n}`,
+    speedOf: (m: string) => `Velocidade da última resposta, por ${m}`,
   },
 });
 
@@ -69,6 +75,10 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
   const [busy, setBusy] = useState(false);
   // shortcut: unknown after a reload until the next reply; store it per message if that matters.
   const [tokens, setTokens] = useState(0);
+  // The last reply's model and speed, why Auto chose it, and what memory put before the question.
+  const [last, setLast] = useState<{ model: string; tps: number } | null>(null);
+  const [route, setRoute] = useState<{ id: string; why: string } | null>(null);
+  const [recalled, setRecalled] = useState<MemoryHit[]>([]);
   const conv = useRef(conversationId);
   const abort = useRef<AbortController | null>(null);
   const log = useRef<HTMLDivElement>(null);
@@ -77,6 +87,9 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
   useEffect(() => () => void (alive.current = false), []);
 
   const current = models.find((m) => m.id === model) ?? models[0];
+  // With Auto, the context that filled up is the answering model's.
+  const answered = models.find((m) => m.id === last?.model);
+  const nameOf = (id: string) => displayName(models.find((m) => m.id === id) ?? { id, thinks: false, loaded: false });
   const active = turns.length > 0;
   useEffect(() => onActive(active), [active, onActive]);
   useEffect(() => () => abort.current?.abort(), []);
@@ -111,6 +124,8 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
     abort.current = ctl;
     pinned.current = true;
     setError(null);
+    setRoute(null);
+    setRecalled([]);
     signal.current.error = false;
     setBusy(true);
     const before: Turn[] = [...turns, { role: "user", content: text, refs, attachments: files.map(({ file, image }) => ({ name: file.name, image, src: image ? URL.createObjectURL(file) : undefined })) }];
@@ -154,8 +169,15 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
             sig.waiting = false;
             pulse(sig, true);
             break;
+          case "model":
+            setRoute(e.data);
+            return;
+          case "recalled":
+            setRecalled(e.data.notes);
+            return;
           case "done":
             setTokens(e.data.tokens ?? 0);
+            if (e.data.model) setLast({ model: e.data.model, tps: e.data.tps ?? 0 });
             return;
         }
         show();
@@ -214,11 +236,17 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
         <Turns
           turns={turns}
           live={busy}
-          loading={!current.loaded && current.id}
+          loading={!current.loaded && current.id !== AUTO && current.id}
           fileUrl={api.fileUrl}
           onDecide={(id, allow, always) => api.approve(id, { allow, always }).catch((e) => setError((e as Error).message))}
           onOpen={onOpen}
         />
+        {route && <p className="hint turn-note">{T.chose(nameOf(route.id), route.why)}</p>}
+        {recalled.length > 0 && (
+          <p className="hint turn-note" title={recalled.map((n) => n.text).join("\n\n")}>
+            {T.recalled([...new Set(recalled.map((n) => n.title || n.ref))].join(", "))}
+          </p>
+        )}
         {error && (
           <p className="error" role="alert">
             {error}
@@ -252,7 +280,12 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
               <span>{T.agent}</span>
             </button>
             <span className="tools-gap" />
-            <ContextMeter used={tokens} size={current.ctx ?? 0} />
+            {last && speedLabel(last.tps, true) && (
+              <span className="tag" title={T.speedOf(nameOf(last.model))}>
+                {speedLabel(last.tps, true)}
+              </span>
+            )}
+            <ContextMeter used={tokens} size={(answered ?? current).ctx ?? 0} />
             <ModelChip
               models={models}
               value={model}

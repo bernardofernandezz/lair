@@ -107,8 +107,28 @@ pub struct Hit {
     pub snippet: String,
 }
 
+/// A piece of a chat or of a workspace file, as memory keeps it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Chunk {
+    pub id: i64,
+    /// `chat` or `file`.
+    pub source: String,
+    /// The conversation's id, or the file's path in the workspace.
+    #[serde(rename = "ref")]
+    pub of: String,
+    pub text: String,
+}
+
 pub struct Store {
     db: Mutex<Connection>,
+}
+
+fn to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn dot(blob: &[u8], q: &[f32]) -> f32 {
+    blob.as_chunks::<4>().0.iter().zip(q).map(|(b, x)| f32::from_le_bytes(*b) * x).sum()
 }
 
 fn now() -> i64 {
@@ -173,6 +193,28 @@ END;
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
 END;
+
+-- Memory: pieces of chats and workspace files, searchable by words (FTS) and by meaning (vec).
+CREATE TABLE IF NOT EXISTS chunks (
+    id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL,   -- 'chat' or 'file'
+    ref TEXT NOT NULL,      -- conversation id, or path relative to the workspace
+    stamp INTEGER NOT NULL, -- chat: the message's id; file: its modification time
+    text TEXT NOT NULL,
+    model TEXT,             -- the embedding model that made vec; NULL until embedded
+    vec BLOB                -- f32 little-endian, length 1
+);
+CREATE INDEX IF NOT EXISTS chunks_ref ON chunks(source, ref);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', content_rowid='id');
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS conversations_forget AFTER DELETE ON conversations BEGIN
+    DELETE FROM chunks WHERE source = 'chat' AND ref = old.id;
+END;
 ";
 
 impl Store {
@@ -184,7 +226,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn memory() -> Self {
+    pub(crate) fn memory() -> Self {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
         migrate(&db);
@@ -193,18 +235,26 @@ impl Store {
 
     /// The saved settings document; `{}` before anything was saved.
     pub fn config(&self) -> Result<Value> {
-        let db = self.db.lock().unwrap();
-        let raw = db
-            .query_row("SELECT value FROM config WHERE key = ?1", [CONFIG_KEY], |r| r.get::<_, String>(0))
-            .optional()?;
-        Ok(raw.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_else(|| Value::Object(Default::default())))
+        Ok(self.kv(CONFIG_KEY)?.unwrap_or_else(|| Value::Object(Default::default())))
     }
 
     pub fn save_config(&self, config: &Value) -> Result<()> {
+        self.save_kv(CONFIG_KEY, config)
+    }
+
+    /// A JSON document kept under `key`; `None` when there is none, or it no longer parses.
+    pub fn kv(&self, key: &str) -> Result<Option<Value>> {
+        let db = self.db.lock().unwrap();
+        let raw =
+            db.query_row("SELECT value FROM config WHERE key = ?1", [key], |r| r.get::<_, String>(0)).optional()?;
+        Ok(raw.and_then(|v| serde_json::from_str(&v).ok()))
+    }
+
+    pub fn save_kv(&self, key: &str, value: &Value) -> Result<()> {
         let db = self.db.lock().unwrap();
         db.execute(
             "INSERT INTO config (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![CONFIG_KEY, config.to_string()],
+            params![key, value.to_string()],
         )?;
         Ok(())
     }
@@ -284,6 +334,130 @@ impl Store {
             params![conv, t, title],
         )?;
         Ok(id)
+    }
+
+    /// Chat messages saved after message `after`, oldest first: `(id, conversation, role, content)`.
+    pub fn messages_after(&self, after: i64, limit: usize) -> Result<Vec<(i64, String, String, String)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT id, conv, role, content FROM messages
+             WHERE id > ?1 AND role IN ('user', 'assistant') ORDER BY id LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![after, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Adds pieces of `of` to memory; with `replace`, in place of the ones it had (a file that changed).
+    pub fn add_chunks(&self, source: &str, of: &str, stamp: i64, texts: &[String], replace: bool) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        if replace {
+            tx.execute("DELETE FROM chunks WHERE source = ?1 AND ref = ?2", params![source, of])?;
+        }
+        for text in texts {
+            tx.execute(
+                "INSERT INTO chunks (source, ref, stamp, text) VALUES (?1, ?2, ?3, ?4)",
+                params![source, of, stamp, text],
+            )?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    pub fn drop_chunks(&self, source: &str, of: &str) -> Result<()> {
+        self.db.lock().unwrap().execute("DELETE FROM chunks WHERE source = ?1 AND ref = ?2", params![source, of])?;
+        Ok(())
+    }
+
+    /// What memory holds of `source`: each ref with its latest stamp.
+    pub fn chunk_refs(&self, source: &str) -> Result<Vec<(String, i64)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT ref, max(stamp) FROM chunks WHERE source = ?1 GROUP BY ref")?;
+        let rows = stmt.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Pieces `model` has not embedded yet: `(id, text)`.
+    pub fn pending_chunks(&self, model: &str, limit: usize) -> Result<Vec<(i64, String)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT id, text FROM chunks WHERE model IS NOT ?1 AND text != '' LIMIT ?2")?;
+        let rows = stmt
+            .query_map(params![model, limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_vectors(&self, model: &str, vectors: &[(i64, Vec<f32>)]) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        for (id, v) in vectors {
+            tx.execute("UPDATE chunks SET model = ?1, vec = ?2 WHERE id = ?3", params![model, to_blob(v), id])?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    /// The pieces that share words with `q`, best match first.
+    pub fn chunks_by_words(&self, q: &str, limit: usize) -> Result<Vec<i64>> {
+        // Any of the words, not all: the question is a sentence, not a list of keywords.
+        let words: Vec<String> = q
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() > 2)
+            .take(24)
+            .map(|w| format!("\"{w}\""))
+            .collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2")?;
+        let rows = stmt
+            .query_map(params![words.join(" OR "), limit as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// The pieces closest in meaning to `q` (a vector from `model`, of length 1), each with its
+    /// cosine, closest first; those under `min` are left out.
+    // ponytail: reads every vector on each search. Fine for a person's chats and files (100k pieces is
+    // ~half a second); store int8 vectors or add an index (sqlite-vec) past that.
+    pub fn chunks_by_meaning(&self, model: &str, q: &[f32], limit: usize, min: f32) -> Result<Vec<(i64, f32)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT id, vec FROM chunks WHERE model = ?1 AND vec IS NOT NULL")?;
+        let mut rows = stmt.query([model])?;
+        let mut found: Vec<(i64, f32)> = Vec::new();
+        while let Some(r) = rows.next()? {
+            let cos = dot(r.get_ref(1)?.as_blob()?, q);
+            if cos >= min {
+                found.push((r.get(0)?, cos));
+            }
+        }
+        found.sort_by(|a, b| b.1.total_cmp(&a.1));
+        found.truncate(limit);
+        Ok(found)
+    }
+
+    pub fn chunk(&self, id: i64) -> Result<Option<Chunk>> {
+        let db = self.db.lock().unwrap();
+        Ok(db
+            .query_row("SELECT id, source, ref, text FROM chunks WHERE id = ?1", [id], |r| {
+                Ok(Chunk { id: r.get(0)?, source: r.get(1)?, of: r.get(2)?, text: r.get(3)? })
+            })
+            .optional()?)
+    }
+
+    /// How many pieces memory holds, and how many of them `model` has embedded.
+    pub fn chunk_counts(&self, model: Option<&str>) -> Result<(u64, u64)> {
+        let db = self.db.lock().unwrap();
+        Ok(db.query_row("SELECT count(*), count(CASE WHEN model = ?1 THEN 1 END) FROM chunks", [model], |r| {
+            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+        })?)
+    }
+
+    /// Forgets everything memory holds.
+    pub fn clear_chunks(&self) -> Result<()> {
+        self.db.lock().unwrap().execute("DELETE FROM chunks", [])?;
+        Ok(())
     }
 
     /// Conversations whose title or messages contain every word of `q` (prefix match), newest first.

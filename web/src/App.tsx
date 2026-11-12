@@ -10,8 +10,8 @@ import { load, save } from "./storage";
 import { pick } from "./i18n";
 
 const T = pick({
-  en: { offline: "The lair server didn't answer. Check that it's running.", retry: "Try again" },
-  pt: { offline: "O servidor lair não respondeu. Confira se ele está rodando.", retry: "Tentar de novo" },
+  en: { offline: "The lair server didn't answer. Check that it's running.", retry: "Try again", expired: "The token stopped working. Sign in again." },
+  pt: { offline: "O servidor lair não respondeu. Confira se ele está rodando.", retry: "Tentar de novo", expired: "O token deixou de valer. Entre de novo." },
 });
 
 type Phase =
@@ -54,7 +54,7 @@ export function App() {
   const authLost = useCallback(() => {
     save("token", "");
     setActive(false);
-    setPhase({ kind: "gate", error: "O token deixou de valer. Entre de novo.", attempt: 0 });
+    setPhase({ kind: "gate", error: T.expired, attempt: 0 });
   }, []);
 
   return (

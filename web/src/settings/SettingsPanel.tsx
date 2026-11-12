@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import type { Api, Config, Settings } from "../api";
+import type { Api, Config, MemoryStatus, Settings } from "../api";
 import { modelName } from "../api";
 import { isEffort, MODES } from "../Controls";
 import { SkillsTab } from "../skills/SkillsPanel";
@@ -15,6 +15,17 @@ const T = pick({
     indexSaved: "Skills index saved.", index: "Skills index", indexHint: "Link to a JSON listing skills to browse and install; empty means no index.", save: "Save",
     generalSaved: "General settings saved.", searxng: "Web search (SearXNG)", searxngHint: "Link to a SearXNG instance set to answer in JSON. Without one, the agent can't search the web.",
     reasoning: "Default reasoning", reasoningHint: "Used when a chat doesn't pick a reasoning level.",
+    hfToken: "Hugging Face token", hfTokenHint: "For gated or private models. Sent to huggingface.co only, and never shown again once saved.",
+    hfTokenSet: "A token is saved; type a new one to replace it", hfTokenClear: "Remove token", hfTokenCleared: "Hugging Face token removed.",
+    memory: "Memory", memoryOn: "Remember my chats and workspace files",
+    memoryHint: "lair indexes your chats and the documents in the agent's workspace on this machine. The agent can search them, and with an embedding model a chat is shown the passages clearly related to your question. Nothing leaves this machine.",
+    memorySaved: "Memory setting saved.",
+    memoryCount: (p: number, e: number) => `${p.toLocaleString()} passages indexed, ${e.toLocaleString()} searchable by meaning`,
+    memoryModel: (m: string) => `Embedding model: ${m}`,
+    memoryNoModel: "No embedding model yet: memory finds passages by their words only.",
+    memoryGet: "Download the embedding model (0.4 GB)", memoryGetting: "Downloading; see the Models tab for progress.",
+    memoryClear: "Forget everything", memoryConfirm: "Forget everything memory holds? Your chats and files stay; they are indexed again from scratch.",
+    memoryCleared: "Memory cleared.",
     connected: "Connected to the tailnet", needsLogin: "needs login", stopped: "stopped", noTailscale: "Tailscale not found", copied: "Copied", copy: "Copy",
     localOnly1: "This lair only listens on ", localOnly2: ", so other devices can't reach that address yet. Restart with ", localOnly3: " (or the tailnet IP) to open it.",
     openAnywhere: "Open that address on any device in your tailnet to use this lair.",
@@ -40,6 +51,17 @@ const T = pick({
     indexSaved: "Índice de skills salvo.", index: "Índice de skills", indexHint: "Endereço de um JSON que lista skills para navegar e instalar; vazio deixa sem índice.", save: "Salvar",
     generalSaved: "Configurações gerais salvas.", searxng: "Busca na web (SearXNG)", searxngHint: "Endereço de uma instância SearXNG configurada para responder em JSON. Sem ela, o agente não busca na web.",
     reasoning: "Raciocínio padrão", reasoningHint: "Usado quando a conversa não escolhe um nível de raciocínio.",
+    hfToken: "Token do Hugging Face", hfTokenHint: "Para modelos restritos ou privados. Enviado só para huggingface.co, e nunca mais exibido depois de salvo.",
+    hfTokenSet: "Há um token salvo; digite outro para substituir", hfTokenClear: "Remover token", hfTokenCleared: "Token do Hugging Face removido.",
+    memory: "Memória", memoryOn: "Lembrar das minhas conversas e dos arquivos do workspace",
+    memoryHint: "O lair indexa suas conversas e os documentos do workspace do agente nesta máquina. O agente pode buscar neles e, com um modelo de embedding, a conversa recebe os trechos claramente relacionados à sua pergunta. Nada sai desta máquina.",
+    memorySaved: "Configuração de memória salva.",
+    memoryCount: (p: number, e: number) => `${p.toLocaleString()} trechos indexados, ${e.toLocaleString()} buscáveis por significado`,
+    memoryModel: (m: string) => `Modelo de embedding: ${m}`,
+    memoryNoModel: "Ainda sem modelo de embedding: a memória encontra trechos só pelas palavras.",
+    memoryGet: "Baixar o modelo de embedding (0,4 GB)", memoryGetting: "Baixando; acompanhe na aba Modelos.",
+    memoryClear: "Esquecer tudo", memoryConfirm: "Esquecer tudo o que a memória guarda? Suas conversas e arquivos ficam; eles são indexados de novo do zero.",
+    memoryCleared: "Memória apagada.",
     connected: "Conectado à tailnet", needsLogin: "precisa de login", stopped: "parado", noTailscale: "Tailscale não encontrado", copied: "Copiado", copy: "Copiar",
     localOnly1: "Este lair só escuta em ", localOnly2: ", então outros aparelhos ainda não alcançam esse endereço. Reinicie com ", localOnly3: " (ou com o IP da tailnet) para abrir.",
     openAnywhere: "Abra esse endereço em qualquer aparelho da sua tailnet para usar este lair.",
@@ -136,6 +158,7 @@ export function SettingsPanel({ api, open, onClose, tab: openOn, onModelsChanged
       )}
 
       {st && tab === "general" && <General st={st} save={save} />}
+      {st && tab === "general" && <MemoryCard api={api} st={st} save={save} say={(text, ok = true) => setNotice({ ok, text })} />}
       {tab === "models" && (
         <ModelsTab
           api={api}
@@ -206,7 +229,10 @@ function General({ st, save }: { st: Settings; save: Save }) {
       onSubmit={(e) => {
         e.preventDefault();
         const reasoning = text(e.currentTarget, "reasoning");
-        save({ searxng: text(e.currentTarget, "searxng"), reasoning: reasoning && isEffort(reasoning) ? reasoning : undefined }, T.generalSaved);
+        // An empty token field means "leave it as it is": the saved one is never shown to be edited.
+        const hfToken = text(e.currentTarget, "hfToken") || undefined;
+        save({ searxng: text(e.currentTarget, "searxng"), reasoning: reasoning && isEffort(reasoning) ? reasoning : undefined, hfToken }, T.generalSaved);
+        e.currentTarget.querySelector<HTMLInputElement>("#set-hf-token")!.value = "";
       }}
     >
       <Field id="set-searxng" label={T.searxng} hint={T.searxngHint} flag={locked(st, "searxng")}>
@@ -221,10 +247,78 @@ function General({ st, save }: { st: Settings; save: Save }) {
           ))}
         </select>
       </Field>
+      <Field id="set-hf-token" label={T.hfToken} hint={T.hfTokenHint} flag={locked(st, "hfToken")}>
+        <input
+          id="set-hf-token"
+          name="hfToken"
+          type="password"
+          autoComplete="off"
+          disabled={locked(st, "hfToken")}
+          placeholder={st.saved.hfToken || st.flags.hfToken ? T.hfTokenSet : "hf_…"}
+        />
+      </Field>
       <div className="editor-actions">
+        {st.saved.hfToken && !locked(st, "hfToken") && (
+          <button type="button" className="ghost" onClick={() => save({ hfToken: "" }, T.hfTokenCleared)}>
+            {T.hfTokenClear}
+          </button>
+        )}
         <button className="solid">{T.save}</button>
       </div>
     </form>
+  );
+}
+
+/** Memory: on or off, what it holds, and the embedding model that lets it search by meaning. */
+function MemoryCard({ api, st, save, say }: { api: Api; st: Settings; save: Save; say: (text: string, ok?: boolean) => void }) {
+  const [m, setM] = useState<MemoryStatus | null>(null);
+  const [getting, setGetting] = useState(false);
+  const refresh = useCallback(() => {
+    api.memory().then(setM, () => {});
+  }, [api]);
+  useEffect(refresh, [refresh, st]);
+  if (!m) return null;
+  const run = (what: () => Promise<unknown>, done: string) => what().then(() => (say(done), refresh()), (e) => say((e as Error).message, false));
+  return (
+    <section className="memory-card" aria-label={T.memory}>
+      <h3 className="models-head">{T.memory}</h3>
+      <label className="set-toggle">
+        <input
+          type="checkbox"
+          checked={m.enabled}
+          disabled={locked(st, "memory")}
+          onChange={(e) => save({ memory: e.currentTarget.checked }, T.memorySaved)}
+        />
+        <span>
+          {T.memoryOn}
+          <span className="hint">{T.memoryHint}</span>
+        </span>
+      </label>
+      {m.enabled && (
+        <>
+          <p className="hint">
+            {T.memoryCount(m.pieces, m.embedded)}. {m.model ? T.memoryModel(m.model) : T.memoryNoModel}
+          </p>
+          <div className="editor-actions">
+            {!m.model && (
+              <button
+                type="button"
+                className="solid"
+                disabled={getting}
+                onClick={() => (setGetting(true), run(() => api.download(m.suggested.repo, m.suggested.file), T.memoryGetting))}
+              >
+                {T.memoryGet}
+              </button>
+            )}
+            {m.pieces > 0 && (
+              <button type="button" className="ghost" onClick={() => confirm(T.memoryConfirm) && run(api.clearMemory, T.memoryCleared)}>
+                {T.memoryClear}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 

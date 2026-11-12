@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Api, Download, Fit, Hardware, HubFile, HubRepo, Suggestion } from "../api";
-import { gb, quantOf } from "../Controls";
+import type { Api, Download, Fit, Hardware, HubFile, HubRepo, LoadedModel, ModelInfo, Suggestion, Why } from "../api";
+import { bareName, gb, quantOf, speedHint, speedLabel } from "../Controls";
 import { pick } from "../i18n";
 
 const T = pick({
@@ -11,12 +11,28 @@ const T = pick({
       no: { label: "Doesn't fit", hint: "Bigger than this machine's memory." },
     },
     noGpu: "No GPU found", vram: " VRAM", ram: " RAM", reading: "Reading the hardware…",
+    free: (a: string, b: string) => `${a} free of ${b}`, cores: (n: number) => `${n} threads`,
+    runsOn: { cuda: "Runs on CUDA", vulkan: "Runs on Vulkan", metal: "Runs on Metal", cpu: "Runs on the CPU" },
+    wsl: "Inside WSL, where lair runs on the CPU: the GPU is only reachable through a slow emulation.",
     ready: "Done: it's in the model list now.", of: (a: string, b: string) => `${a} of ${b}`, downloading: (f: string) => `Downloading ${f}`,
-    cancel: "Cancel", dismiss: "Dismiss", recommended: "Recommended", forThis: "Recommended for this machine",
+    verifying: "Checking the download against its published hash…", resume: "Continue",
+    resumeHint: "What was already downloaded is kept; this continues from there.",
+    cancel: "Cancel", dismiss: "Dismiss", recommended: "Recommended", forThis: "Best for this machine, from Hugging Face",
+    forThisHint: "What is trending on Hugging Face and what lair vouches for, judged against this machine. The best pick is the biggest model from a trusted publisher that runs fully here, fast, at 4 bits or better.",
     asking: "Asking Hugging Face…", hfDown: "Couldn't reach Hugging Face right now.", best: "Best pick", noFit: "Doesn't fit",
+    why: {
+      fits: "runs fully on this machine", tight: "runs partly on the CPU", fast: "fast here", slow: "slow here",
+      trusted: "trusted publisher", trending: "trending", gated: "needs a Hugging Face token", low_quant: "heavily compressed",
+    },
     search: "Search Hugging Face", searchPlaceholder: "E.g. qwen3, llama, mistral, gemma", searchLabel: "Search GGUF models on Hugging Face",
-    searchHint: "Only repos with .gguf files. Gated models and models split into parts don't show up.", nothing: "Nothing found.",
-    vision: "Vision", installed: "Installed", download: "Download", listing: "Listing files…", noFiles: "No single-file .gguf in this repo.",
+    searchHint: "Only repos with .gguf files. Gated and private repos need a Hugging Face token (General tab).", nothing: "Nothing found.",
+    vision: "Vision", thinks: "Thinks", installed: "Installed", download: "Download", listing: "Listing files…", noFiles: "No .gguf model in this repo.",
+    parts: (n: number) => `${n} parts`,
+    onDisk: "On this machine", none: "No models yet. Pick one below.", inMemory: "In memory", embeds: "Embeddings",
+    loadedAs: (g: number, l: number, c: number) => `${g} of ${l} layers on the GPU, context ${c.toLocaleString()}`,
+    unload: "Unload", unloadHint: "Frees its memory; it loads again when a chat uses it.",
+    remove: "Delete", confirmRemove: (m: string) => `Delete ${m} from this machine? Its file is removed from disk.`,
+    freed: (s: string) => `Deleted; ${s} freed.`,
   },
   pt: {
     fit: {
@@ -25,18 +41,38 @@ const T = pick({
       no: { label: "Não cabe", hint: "Maior que a memória desta máquina." },
     },
     noGpu: "Sem GPU detectada", vram: " de VRAM", ram: " de RAM", reading: "Lendo o hardware…",
+    free: (a: string, b: string) => `${a} livres de ${b}`, cores: (n: number) => `${n} threads`,
+    runsOn: { cuda: "Roda em CUDA", vulkan: "Roda em Vulkan", metal: "Roda em Metal", cpu: "Roda na CPU" },
+    wsl: "Dentro do WSL, onde o lair roda na CPU: a GPU só é alcançada por uma emulação lenta.",
     ready: "Pronto: já aparece na lista de modelos.", of: (a: string, b: string) => `${a} de ${b}`, downloading: (f: string) => `Baixando ${f}`,
-    cancel: "Cancelar", dismiss: "Dispensar", recommended: "Recomendado", forThis: "Recomendados para esta máquina",
+    verifying: "Conferindo o download com o hash publicado…", resume: "Continuar",
+    resumeHint: "O que já foi baixado fica guardado; o download continua de onde parou.",
+    cancel: "Cancelar", dismiss: "Dispensar", recommended: "Recomendado", forThis: "Melhores para esta máquina, do Hugging Face",
+    forThisHint: "O que está em alta no Hugging Face e o que o lair recomenda, avaliados para esta máquina. A melhor escolha é o maior modelo de um publicador confiável que roda inteiro aqui, rápido, com 4 bits ou mais.",
     asking: "Consultando o Hugging Face…", hfDown: "Não foi possível falar com o Hugging Face agora.", best: "Melhor escolha", noFit: "Não cabe",
+    why: {
+      fits: "roda inteiro nesta máquina", tight: "roda em parte na CPU", fast: "rápido aqui", slow: "lento aqui",
+      trusted: "publicador confiável", trending: "em alta", gated: "precisa de token do Hugging Face", low_quant: "muito comprimido",
+    },
     search: "Buscar no Hugging Face", searchPlaceholder: "Ex.: qwen3, llama, mistral, gemma", searchLabel: "Buscar modelos GGUF no Hugging Face",
-    searchHint: "Só repositórios com arquivos .gguf. Modelos com acesso restrito ou divididos em partes não aparecem.", nothing: "Nada encontrado.",
-    vision: "Visão", installed: "Instalado", download: "Baixar", listing: "Listando arquivos…", noFiles: "Nenhum .gguf de arquivo único neste repositório.",
+    searchHint: "Só repositórios com arquivos .gguf. Repositórios restritos ou privados precisam de um token do Hugging Face (aba Geral).", nothing: "Nada encontrado.",
+    vision: "Visão", thinks: "Pensa", installed: "Instalado", download: "Baixar", listing: "Listando arquivos…", noFiles: "Nenhum modelo .gguf neste repositório.",
+    parts: (n: number) => `${n} partes`,
+    onDisk: "Nesta máquina", none: "Nenhum modelo ainda. Escolha um abaixo.", inMemory: "Na memória", embeds: "Embeddings",
+    loadedAs: (g: number, l: number, c: number) => `${g} de ${l} camadas na GPU, contexto ${c.toLocaleString()}`,
+    unload: "Descarregar", unloadHint: "Libera a memória; ele carrega de novo quando uma conversa usar.",
+    remove: "Apagar", confirmRemove: (m: string) => `Apagar ${m} desta máquina? O arquivo é removido do disco.`,
+    freed: (s: string) => `Apagado; ${s} liberados.`,
   },
 });
 
 const FIT: Record<Fit, { label: string; hint: string }> = T.fit;
 
 const active = (d: Download) => !d.finished && !d.error;
+const keyOf = (d: { repo: string; file: string }) => `${d.repo}/${d.file}`;
+
+/** A suggestion's reasons as one line: "trusted publisher · runs fully on this machine · fast here". */
+export const reasonLine = (why: Why[], words: Record<Why, string> = T.why) => why.map((w) => words[w]).filter(Boolean).join(" · ");
 
 /** Find models on Hugging Face, see which fit this machine, and download them. */
 export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => void }) {
@@ -49,6 +85,8 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
   // Bumped when a download finishes, so file lists show what is now installed.
   const [installed, setInstalled] = useState(0);
   const finished = useRef(new Set<string>());
+  const [local, setLocal] = useState<{ models: ModelInfo[]; loaded: LoadedModel[] } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const fail = (e: unknown) => setError((e as Error).message);
 
@@ -57,7 +95,9 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
     api.downloads().then(setDownloads, fail);
   }, [api]);
   useEffect(() => {
-    api.suggested().then(setSuggested, fail);
+    api.suggested().then(setSuggested, (e) => (setSuggested([]), fail(e)));
+    api.localModels().then(setLocal, fail);
+    api.hardware().then(setHw, () => {});
   }, [api, installed]);
 
   // Polls only while something is downloading.
@@ -68,9 +108,9 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
     return () => clearInterval(t);
   }, [api, polling]);
   useEffect(() => {
-    const done = downloads.filter((d) => d.finished && !finished.current.has(d.file));
+    const done = downloads.filter((d) => d.finished && !finished.current.has(keyOf(d)));
     if (!done.length) return;
-    done.forEach((d) => finished.current.add(d.file));
+    done.forEach((d) => finished.current.add(keyOf(d)));
     setInstalled((n) => n + 1);
     onInstalled();
   }, [downloads, onInstalled]);
@@ -95,30 +135,37 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
     [api],
   );
 
-  const cancel = async (file: string) => {
+  const cancel = async (d: Download) => {
     try {
-      await api.cancelDownload(file);
+      await api.cancelDownload(d.repo, d.file);
       setDownloads(await api.downloads());
     } catch (e) {
       fail(e);
     }
   };
 
-  const running = (file: string) => downloads.find((d) => d.file === file && active(d));
+  /** Runs a change to the installed models, then shows them (and the memory they use) again. */
+  const change = async (what: () => Promise<string | void>) => {
+    setError(null);
+    setNotice(null);
+    try {
+      setNotice((await what()) ?? null);
+      setInstalled((n) => n + 1);
+      onInstalled();
+    } catch (e) {
+      fail(e);
+    }
+  };
+  const remove = (m: ModelInfo) => {
+    if (!confirm(T.confirmRemove(m.id))) return;
+    change(async () => T.freed(gb((await api.removeModel(m.id)).freed)));
+  };
+
+  const running = (repo: string, file: string) => downloads.find((d) => d.repo === repo && d.file === file && active(d));
 
   return (
     <div className="models-tab">
-      <p className="hw-line">
-        {hw ? (
-          <>
-            {hw.gpus.length ? hw.gpus.join(", ") : T.noGpu}
-            {hw.vram > 0 && <span className="tag">{gb(hw.vram) + T.vram}</span>}
-            {hw.ram > 0 && <span className="tag">{gb(hw.ram) + T.ram}</span>}
-          </>
-        ) : (
-          T.reading
-        )}
-      </p>
+      <HardwarePanel hw={hw} />
 
       {error && (
         <p className="error" role="alert">
@@ -126,23 +173,78 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
         </p>
       )}
 
+      {notice && (
+        <p className="hint" role="status">
+          {notice}
+        </p>
+      )}
+
+      <section aria-label={T.onDisk}>
+        <h3 className="models-head">{T.onDisk}</h3>
+        {local?.models.length === 0 && <p className="hint">{T.none}</p>}
+        <ul className="skill-list">
+          {local?.models.map((m) => {
+            const loaded = local.loaded.find((l) => l.id === m.id);
+            const speed = speedLabel(m.tps, m.measured);
+            return (
+              <li key={m.id}>
+                <div className="skill-main">
+                  <span className="skill-name">
+                    {bareName(m.id)}
+                    {loaded && <span className="badge is-live">{T.inMemory}</span>}
+                  </span>
+                  {loaded && <span className="skill-desc">{T.loadedAs(loaded.gpu_layers, loaded.layers, loaded.ctx)}</span>}
+                  <span className="option-meta">
+                    {(m.quant || quantOf(m.id)) && <span className="tag">{m.quant || quantOf(m.id)}</span>}
+                    {m.size ? <span className="tag">{gb(m.size)}</span> : null}
+                    {speed && (
+                      <span className="tag" title={speedHint(m.measured)}>
+                        {speed}
+                      </span>
+                    )}
+                    {m.embedding && <span className="tag">{T.embeds}</span>}
+                    {m.thinks && <span className="tag">{T.thinks}</span>}
+                    {m.vision && <span className="tag">{T.vision}</span>}
+                  </span>
+                </div>
+                <div className="skill-actions">
+                  {loaded && (
+                    <button className="ghost" title={T.unloadHint} disabled={loaded.busy} onClick={() => change(() => api.unloadModel(m.id))}>
+                      {T.unload}
+                    </button>
+                  )}
+                  <button className="ghost" disabled={loaded?.busy} onClick={() => remove(m)}>
+                    {T.remove}
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+
       {downloads.length > 0 && (
         <section aria-label="Downloads">
           <h3 className="models-head">Downloads</h3>
           <ul className="skill-list">
             {downloads.map((d) => (
-              <li key={d.file} className="download">
+              <li key={keyOf(d)} className="download">
                 <div className="skill-main">
                   <span className="skill-name">{d.file}</span>
                   <span className="skill-desc">
-                    {d.error ? d.error : d.finished ? T.ready : T.of(gb(d.done), gb(d.total))}
+                    {d.error ? d.error : d.finished ? T.ready : d.verifying ? T.verifying : T.of(gb(d.done), gb(d.total))}
                   </span>
                   {active(d) && (
                     <progress max={d.total || 1} value={d.done} aria-label={T.downloading(d.file)} />
                   )}
                 </div>
                 <div className="skill-actions">
-                  <button className="ghost" onClick={() => cancel(d.file)}>
+                  {d.error && (
+                    <button className="solid" title={T.resumeHint} onClick={() => start(d.repo, d.file)}>
+                      {T.resume}
+                    </button>
+                  )}
+                  <button className="ghost" onClick={() => cancel(d)}>
                     {active(d) ? T.cancel : T.dismiss}
                   </button>
                 </div>
@@ -154,6 +256,7 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
 
       <section aria-label={T.recommended}>
         <h3 className="models-head">{T.forThis}</h3>
+        <p className="hint">{T.forThisHint}</p>
         {!suggested && <p className="hint">{T.asking}</p>}
         {suggested?.length === 0 && <p className="hint">{T.hfDown}</p>}
         <ul className="skill-list">
@@ -164,12 +267,12 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
                   {s.repo.split("/")[1].replace(/-GGUF$/i, "")}
                   {s.best && <span className="badge is-live">{T.best}</span>}
                 </span>
-                <span className="skill-desc">{s.about}</span>
-                {s.pick && <FileTags file={s.pick} vision={s.vision} />}
+                <span className="skill-desc">{[reasonLine(s.why), s.about].filter(Boolean).join(". ")}</span>
+                {s.pick && <FileTags file={s.pick} vision={s.vision} thinks={s.thinks} />}
               </div>
               <div className="skill-actions">
                 {s.pick ? (
-                  <DownloadButton file={s.pick} running={running(s.pick.name)} onStart={() => start(s.repo, s.pick!.name)} />
+                  <DownloadButton file={s.pick} running={running(s.repo, s.pick.name)} onStart={() => start(s.repo, s.pick!.name)} />
                 ) : (
                   <span className="hint">{T.noFit}</span>
                 )}
@@ -204,15 +307,46 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
   );
 }
 
-function FileTags({ file, vision }: { file: HubFile; vision?: boolean }) {
-  const quant = quantOf(file.name.replace(/\.gguf$/i, ""));
+/** What this machine has to run models on: the CPU, memory, each GPU and the backend lair uses. */
+function HardwarePanel({ hw }: { hw: Hardware | null }) {
+  if (!hw) return <p className="hw-line">{T.reading}</p>;
+  return (
+    <div className="hw-panel">
+      <p className="hw-line">
+        {hw.cpu || "CPU"}
+        <span className="tag">{T.cores(hw.cores)}</span>
+        {hw.ram > 0 && <span className="tag">{(hw.ram_free > 0 ? T.free(gb(hw.ram_free), gb(hw.ram)) : gb(hw.ram)) + T.ram}</span>}
+        <span className={`tag${hw.backend === "cpu" ? "" : " is-on"}`}>{T.runsOn[hw.backend]}</span>
+      </p>
+      {hw.gpus.length === 0 && <p className="hw-line">{T.noGpu}</p>}
+      {hw.gpus.map((g, i) => (
+        <p className="hw-line" key={i}>
+          {g.name}
+          <span className="tag">{(g.free > 0 && g.free < g.total ? T.free(gb(g.free), gb(g.total)) : gb(g.total)) + T.vram}</span>
+        </p>
+      ))}
+      {hw.wsl && hw.backend === "cpu" && <p className="hint">{T.wsl}</p>}
+    </div>
+  );
+}
+
+function FileTags({ file, vision, thinks }: { file: HubFile; vision?: boolean; thinks?: boolean }) {
+  const quant = quantOf(file.name.replace(/(-\d{5}-of-\d{5})?\.gguf$/i, ""));
+  const speed = speedLabel(file.tps);
   return (
     <span className="option-meta">
       {quant && <span className="tag">{quant}</span>}
       <span className="tag">{gb(file.size)}</span>
+      {(file.parts ?? 1) > 1 && <span className="tag">{T.parts(file.parts!)}</span>}
       <span className={`tag fit-${file.fit}`} title={FIT[file.fit].hint}>
         {FIT[file.fit].label}
       </span>
+      {speed && (
+        <span className="tag" title={speedHint(false)}>
+          {speed}
+        </span>
+      )}
+      {thinks && <span className="tag">{T.thinks}</span>}
       {vision && <span className="tag">{T.vision}</span>}
     </span>
   );
@@ -238,7 +372,7 @@ function RepoRow({
   api: Api;
   repo: HubRepo;
   installed: number;
-  running: (file: string) => Download | undefined;
+  running: (repo: string, file: string) => Download | undefined;
   onStart: (repo: string, file: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -275,7 +409,7 @@ function RepoRow({
                   <FileTags file={f} vision={vision} />
                 </div>
                 <div className="skill-actions">
-                  <DownloadButton file={f} running={running(f.name)} onStart={() => onStart(repo.id, f.name)} />
+                  <DownloadButton file={f} running={running(repo.id, f.name)} onStart={() => onStart(repo.id, f.name)} />
                 </div>
               </li>
             ))}
