@@ -85,7 +85,7 @@ lair works out what to run and how, so you don't have to read model cards and co
 
 ## Use it from other apps
 
-lair speaks two APIs on the same port, so most apps that run local models work with it unchanged.
+lair speaks three APIs on the same port, so most apps that run local models work with it unchanged.
 
 **Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete` and `/api/version`. `/api/pull` takes Hugging Face repos (`Qwen/Qwen3-4B-GGUF`, `hf.co/owner/repo:QUANT`), not names from Ollama's own library.
 
@@ -105,7 +105,15 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
 }'
 ```
 
-Both accept `tools` (function calling) and images, which is what coding agents and chat front-ends rely on:
+**Apps made for Anthropic, Claude Code included:** set the base URL to `http://localhost:8080` and any API key. lair answers `/v1/messages` (streaming, tools, thinking, images) and `/v1/messages/count_tokens`. A model named `claude-…` means `auto`; name a lair model to pick one.
+
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=local ANTHROPIC_MODEL=Qwen3-8B-Q4_K_M claude
+```
+
+Claude Code's prompt alone is about 17,000 tokens, so start lair with `--ctx 32768` and use a GPU: on a CPU the first reply takes minutes.
+
+All of them accept `tools` (function calling) and images, which is what coding agents and chat front-ends rely on:
 
 - **Tools:** pass `tools` as usual and calls come back as `tool_calls`, several in one reply when the model makes several. Any model works: lair asks for calls in plain text and parses them, so it doesn't depend on the model's chat template supporting tools. `tool_choice` is honoured as an instruction to the model.
 - **Structured output:** `response_format` with `json_object` or a `json_schema` (OpenAI), or `format` (Ollama), constrains the answer to valid JSON matching the schema, token by token.
@@ -129,7 +137,7 @@ If you set `LAIR_TOKEN`, clients must send it as `Authorization: Bearer <token>`
 | **Agent mode** | The model reads and writes files, runs commands, searches the web and digs through past chats. You approve each risky step. |
 | **Skills** | Prompt packages that kick in on trigger words. Write them in the UI or install them from a URL. |
 | **Your machines, one network** | lair nodes on your Tailscale network find each other and share their models. |
-| **Works with your tools** | OpenAI (`/v1`) and Ollama (`/api`) compatible, with streaming, tool calling, images, structured output and embeddings. |
+| **Works with your tools** | OpenAI (`/v1`), Anthropic (`/v1/messages`) and Ollama (`/api`) compatible, with streaming, tool calling, images, structured output and embeddings. |
 
 ### Agent mode
 

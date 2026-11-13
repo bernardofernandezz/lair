@@ -18,6 +18,7 @@ use crate::lair::Lair;
 #[allow_missing = true]
 struct AssetsUi;
 
+mod anthropic;
 mod compat;
 mod native;
 mod ollama;
@@ -40,7 +41,7 @@ pub struct AppState {
     pub addr: String,
 }
 
-/// Every route: the three APIs behind the token check, and the web UI for the rest.
+/// Every route: the APIs behind the token check, and the web UI for the rest.
 fn router(state: Arc<AppState>) -> Router {
     let auth = middleware::from_fn_with_state(state.clone(), require_token);
     let v1 = Router::new()
@@ -49,6 +50,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/chat/completions", post(compat::chat_completions))
         .route("/completions", post(compat::completions))
         .route("/embeddings", post(compat::embeddings))
+        .route("/messages", post(anthropic::messages))
+        .route("/messages/count_tokens", post(anthropic::count_tokens))
         .route("/assets/{*id}", get(asset_file))
         .route("/session", post(create_session))
         .route_layer(auth.clone())
@@ -145,6 +148,8 @@ async fn require_token(
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
+            // Clients of the Anthropic API send their key in `x-api-key`.
+            .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()))
             .unwrap_or("");
         // GLTF textures are fetched by <img>, which cannot send Authorization, so the UI also holds
         // the token in an HttpOnly cookie; its Path=/v1/assets keeps browsers from sending it elsewhere.

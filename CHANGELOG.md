@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Anthropic API: `/v1/messages` (streaming, tools, thinking, images) and `/v1/messages/count_tokens`,
+  so Claude Code and other Anthropic clients run on local models. `x-api-key` is accepted as the
+  token, and `claude-…` model names mean `auto`.
+
 ## 1.0.0
 
 lair now works out what to run and how. It reads the hardware, ranks what is on Hugging Face for it,
