@@ -56,6 +56,10 @@ jobs:
             os: ubuntu-24.04
             features: vulkan
             apt: libvulkan-dev glslc spirv-headers
+          # Raspberry Pi 4 and later, Jetson, Graviton: llama.cpp builds for plain armv8-a here.
+          - asset: lair-linux-arm64-cpu
+            os: ubuntu-22.04-arm
+            features: ""
           - asset: lair-macos-arm64
             os: macos-15
             features: metal
@@ -103,6 +107,24 @@ jobs:
       - run: sha256sum *.tar.gz | tee SHA256SUMS
       - run: gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
       - run: gh release edit "$GITHUB_REF_NAME" --draft=false
+
+  # `brew tap bernardofernandezz/lair https://github.com/bernardofernandezz/lair` reads Formula/ from main.
+  homebrew:
+    needs: publish
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - run: gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS
+      - run: mkdir -p Formula && scripts/brew-formula.sh "$GITHUB_REF_NAME" SHA256SUMS > Formula/lair.rb
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/lair.rb
+          git diff --cached --quiet || { git commit -m "chore: Homebrew formula for $GITHUB_REF_NAME" && git push; }
 
   image:
     needs: [ci, check]

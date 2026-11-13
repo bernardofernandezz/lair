@@ -22,11 +22,18 @@ lair is a single Rust binary built on [llama.cpp](https://github.com/ggml-org/ll
 
 ## Install
 
-Linux (x86_64) and macOS (Apple Silicon):
+Linux (x86_64 and arm64) and macOS (Apple Silicon):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bernardofernandezz/lair/main/install.sh | sh
 lair serve
+```
+
+With [Homebrew](https://brew.sh) (macOS and Linux):
+
+```bash
+brew tap bernardofernandezz/lair https://github.com/bernardofernandezz/lair
+brew install bernardofernandezz/lair/lair
 ```
 
 Windows 10 or 11 (x86_64), in PowerShell:
@@ -38,7 +45,7 @@ lair serve
 
 Open http://localhost:8080 and start talking. The first run looks at your hardware, asks Hugging Face which model runs best on it (6 GB at most; bigger ones are yours to choose) and downloads that one, so you have something to chat with right away. Offline, or if Hugging Face doesn't answer, it falls back to Qwen3 4B (about 2.5 GB).
 
-The installer puts `lair` in `~/.local/bin` (`%LOCALAPPDATA%\Programs\lair` on Windows) and doesn't need root. On Linux and Windows it picks the Vulkan build when a GPU driver is present (NVIDIA, AMD and Intel all work, no CUDA required) and the CPU build otherwise. Macs use Metal.
+The installer puts `lair` in `~/.local/bin` (`%LOCALAPPDATA%\Programs\lair` on Windows) and doesn't need root. On Linux and Windows it picks the Vulkan build when a GPU driver is present (NVIDIA, AMD and Intel all work, no CUDA required) and the CPU build otherwise (always on arm64 Linux). Macs use Metal.
 
 ### Windows
 
