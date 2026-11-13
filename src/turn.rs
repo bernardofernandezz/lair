@@ -192,7 +192,8 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     }
 
     let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model: model.clone(), sources: 0 };
-    for _ in 0..agent::MAX_STEPS {
+    let max_steps = lair.config().max_steps.unwrap_or(agent::MAX_STEPS);
+    for _ in 0..max_steps {
         match step.generate(&model, prompt.clone(), params.clone(), c.agent).await? {
             Err(Gone) => return Ok(()),
             Ok(Generated { text, reasoning, call: None, finish }) => return step.finish(text, reasoning, finish),
@@ -215,7 +216,7 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
             }
         }
     }
-    let note = format!("I stopped after {} tool steps. Ask me to continue if needed.", agent::MAX_STEPS);
+    let note = format!("I stopped after {max_steps} tool steps. Ask me to continue if needed.");
     let _ = out.send(Out::Answer { text: note.clone() });
     step.finish(note, None, Finish::Length)
 }

@@ -22,11 +22,18 @@ lair is a single Rust binary built on [llama.cpp](https://github.com/ggml-org/ll
 
 ## Install
 
-Linux (x86_64) and macOS (Apple Silicon):
+Linux (x86_64 and arm64) and macOS (Apple Silicon):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bernardofernandezz/lair/main/install.sh | sh
 lair serve
+```
+
+With [Homebrew](https://brew.sh) (macOS and Linux):
+
+```bash
+brew tap bernardofernandezz/lair https://github.com/bernardofernandezz/lair
+brew install bernardofernandezz/lair/lair
 ```
 
 Windows 10 or 11 (x86_64), in PowerShell:
@@ -38,7 +45,7 @@ lair serve
 
 Open http://localhost:8080 and start talking. The first run looks at your hardware, asks Hugging Face which model runs best on it (6 GB at most; bigger ones are yours to choose) and downloads that one, so you have something to chat with right away. Offline, or if Hugging Face doesn't answer, it falls back to Qwen3 4B (about 2.5 GB).
 
-The installer puts `lair` in `~/.local/bin` (`%LOCALAPPDATA%\Programs\lair` on Windows) and doesn't need root. On Linux and Windows it picks the Vulkan build when a GPU driver is present (NVIDIA, AMD and Intel all work, no CUDA required) and the CPU build otherwise. Macs use Metal.
+The installer puts `lair` in `~/.local/bin` (`%LOCALAPPDATA%\Programs\lair` on Windows) and doesn't need root. On Linux and Windows it picks the Vulkan build when a GPU driver is present (NVIDIA, AMD and Intel all work, no CUDA required) and the CPU build otherwise (always on arm64 Linux). Macs use Metal.
 
 ### Windows
 
@@ -85,9 +92,11 @@ lair works out what to run and how, so you don't have to read model cards and co
 
 ## Use it from other apps
 
-lair speaks two APIs on the same port, so most apps that run local models work with it unchanged.
+lair speaks three APIs on the same port, so most apps that run local models work with it unchanged.
 
-**Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete` and `/api/version`. `/api/pull` takes Hugging Face repos (`Qwen/Qwen3-4B-GGUF`, `hf.co/owner/repo:QUANT`), not names from Ollama's own library.
+**Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete` and `/api/version`. `/api/pull` and `lair pull` take Hugging Face repos (`Qwen/Qwen3-4B-GGUF`, `hf.co/owner/repo:QUANT`) and the common names from Ollama's library (`qwen3`, `llama3.2:3b`, `gemma3`, `deepseek-r1:7b`, `gpt-oss`…), each mapped to a fixed repo from a known publisher.
+
+**Coming from Ollama?** The models it already downloaded show up in lair under the same names, read from `~/.ollama/models` (or `OLLAMA_MODELS`) without a second copy. lair never deletes them; Ollama's vision models load without their image projector.
 
 ```bash
 curl localhost:8080/api/chat -d '{
@@ -105,7 +114,15 @@ curl localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '
 }'
 ```
 
-Both accept `tools` (function calling) and images, which is what coding agents and chat front-ends rely on:
+**Apps made for Anthropic, Claude Code included:** set the base URL to `http://localhost:8080` and any API key. lair answers `/v1/messages` (streaming, tools, thinking, images) and `/v1/messages/count_tokens`. A model named `claude-…` means `auto`; name a lair model to pick one.
+
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=local ANTHROPIC_MODEL=Qwen3-8B-Q4_K_M claude
+```
+
+Claude Code's prompt alone is about 17,000 tokens, so start lair with `--ctx 32768` and use a GPU: on a CPU the first reply takes minutes.
+
+All of them accept `tools` (function calling) and images, which is what coding agents and chat front-ends rely on:
 
 - **Tools:** pass `tools` as usual and calls come back as `tool_calls`, several in one reply when the model makes several. Any model works: lair asks for calls in plain text and parses them, so it doesn't depend on the model's chat template supporting tools. `tool_choice` is honoured as an instruction to the model.
 - **Structured output:** `response_format` with `json_object` or a `json_schema` (OpenAI), or `format` (Ollama), constrains the answer to valid JSON matching the schema, token by token.
@@ -129,11 +146,11 @@ If you set `LAIR_TOKEN`, clients must send it as `Authorization: Bearer <token>`
 | **Agent mode** | The model reads and writes files, runs commands, searches the web and digs through past chats. You approve each risky step. |
 | **Skills** | Prompt packages that kick in on trigger words. Write them in the UI or install them from a URL. |
 | **Your machines, one network** | lair nodes on your Tailscale network find each other and share their models. |
-| **Works with your tools** | OpenAI (`/v1`) and Ollama (`/api`) compatible, with streaming, tool calling, images, structured output and embeddings. |
+| **Works with your tools** | OpenAI (`/v1`), Anthropic (`/v1/messages`) and Ollama (`/api`) compatible, with streaming, tool calling, images, structured output and embeddings. |
 
 ### Agent mode
 
-Switch on **Agent** in the composer and the model can act instead of only writing. It calls a tool, lair runs it and hands back the result, up to 8 steps per reply. Each step shows up in the chat as a card.
+Switch on **Agent** in the composer and the model can act instead of only writing. It calls a tool, lair runs it and hands back the result, up to 20 steps per reply (`--max-steps` or `LAIR_MAX_STEPS` changes that). Each step shows up in the chat as a card.
 
 | Tool | What it does | Asks first |
 | --- | --- | :---: |
@@ -292,6 +309,10 @@ skills/          built-in skills, embedded in the binary
 ```
 
 </details>
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately, as [SECURITY.md](SECURITY.md) explains.
 
 ## License
 

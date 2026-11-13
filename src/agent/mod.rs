@@ -19,8 +19,8 @@ use crate::engine::partial_suffix;
 
 const OPEN: &str = "<tool_call>";
 const CLOSE: &str = "</tool_call>";
-/// Tool steps allowed in one reply before lair stops the loop.
-pub const MAX_STEPS: usize = 8;
+/// Tool steps allowed in one reply before lair stops the loop, unless `--max-steps` says otherwise.
+pub const MAX_STEPS: usize = 20;
 /// How long a call waits for the user to approve it.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 

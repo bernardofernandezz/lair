@@ -18,6 +18,9 @@ fn asset() -> Result<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64", not(feature = "cuda"))) {
         return Ok(if cfg!(feature = "vulkan") { "lair-linux-x86_64-vulkan" } else { "lair-linux-x86_64-cpu" });
     }
+    if cfg!(all(target_os = "linux", target_arch = "aarch64", not(feature = "cuda"), not(feature = "vulkan"))) {
+        return Ok("lair-linux-arm64-cpu");
+    }
     if cfg!(all(target_os = "windows", target_arch = "x86_64", not(feature = "cuda"))) {
         return Ok(if cfg!(feature = "vulkan") { "lair-windows-x86_64-vulkan" } else { "lair-windows-x86_64-cpu" });
     }

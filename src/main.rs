@@ -124,6 +124,9 @@ enum Cmd {
         /// Hugging Face token, for downloading gated or private models
         #[arg(long, env = "HF_TOKEN", hide_env_values = true)]
         hf_token: Option<String>,
+        /// Tool steps the agent may take in one reply (default: 20)
+        #[arg(long, env = "LAIR_MAX_STEPS", value_parser = clap::value_parser!(u16).range(1..=200))]
+        max_steps: Option<u16>,
         #[command(flatten)]
         network: NetworkArgs,
     },
@@ -239,6 +242,8 @@ impl ModelArgs {
     fn resolve(&mut self, data: &std::path::Path) -> Result<()> {
         if self.models.is_empty() {
             self.models.push(models_dir(Some(data.join("models")))?);
+            // Models Ollama already downloaded run here too, with no second copy.
+            self.models.extend(engine::ollama_dir().filter(|d| d.join("manifests").is_dir()));
         }
         Ok(())
     }
@@ -248,6 +253,7 @@ impl ModelArgs {
         let mut found = Vec::new();
         for p in &self.models {
             let _ = engine::collect_gguf(p, &mut found);
+            found.extend(engine::ollama_models(p).into_iter().map(|(_, blob)| blob));
         }
         if !found.is_empty() || self.default_model.is_empty() {
             return Ok(());
@@ -508,7 +514,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { mut model, skills, host, port, token, data, workspace, searxng, hf_token, network } => {
+        Cmd::Serve { mut model, skills, host, port, token, data, workspace, searxng, hf_token, max_steps, network } => {
             if token.is_none() && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
                 eprintln!("warning: serving on {host} without --token; anyone who can reach it can use it");
             }
@@ -528,6 +534,7 @@ async fn main() -> Result<()> {
                 trust_tailnet: None,
                 hf_token: hf_token.filter(|t| !t.is_empty()),
                 memory: None,
+                max_steps: max_steps.map(usize::from),
             };
             let config = flags.over(&saved);
             model.resolve(&data)?;

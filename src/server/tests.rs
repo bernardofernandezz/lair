@@ -122,6 +122,9 @@ async fn bad_requests_are_refused_before_anything_runs() {
     assert!(status == StatusCode::BAD_REQUEST && e["error"]["message"].as_str().unwrap().contains("yaml"), "{e}");
     let empty = json!({ "messages": [] });
     assert_eq!(call(&s, "POST", "/v1/chat/completions", None, Some(empty)).await.0, StatusCode::BAD_REQUEST);
+    let (status, e) = call(&s, "POST", "/v1/messages", None, Some(ask(json!({ "model": "nope" })))).await;
+    assert!(status == StatusCode::NOT_FOUND && e["type"] == "error", "{e}");
+    assert_eq!(call(&s, "POST", "/v1/messages", None, Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
 
     // Pulling takes Hugging Face repos only: a URL or an Ollama library name never reaches the network.
     for name in ["https://evil.example/m.gguf", "llama3"] {

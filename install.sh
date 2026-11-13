@@ -10,6 +10,7 @@ dir=${LAIR_INSTALL_DIR:-$HOME/.local/bin}
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) asset=lair-macos-arm64 ;;
+  Linux-aarch64 | Linux-arm64) asset=lair-linux-arm64-cpu ;;
   Linux-x86_64)
     variant=${LAIR_VARIANT:-}
     if [ -z "$variant" ] && grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
