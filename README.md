@@ -310,6 +310,10 @@ skills/          built-in skills, embedded in the binary
 
 </details>
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately, as [SECURITY.md](SECURITY.md) explains.
+
 ## License
 
 [MIT](LICENSE)
