@@ -87,7 +87,9 @@ lair works out what to run and how, so you don't have to read model cards and co
 
 lair speaks three APIs on the same port, so most apps that run local models work with it unchanged.
 
-**Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete` and `/api/version`. `/api/pull` takes Hugging Face repos (`Qwen/Qwen3-4B-GGUF`, `hf.co/owner/repo:QUANT`), not names from Ollama's own library.
+**Apps made for Ollama:** point them at `http://localhost:8080` instead of `http://localhost:11434`, or start lair with `--port 11434` so their default address works (stop Ollama first if it runs there). lair answers `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete` and `/api/version`. `/api/pull` and `lair pull` take Hugging Face repos (`Qwen/Qwen3-4B-GGUF`, `hf.co/owner/repo:QUANT`) and the common names from Ollama's library (`qwen3`, `llama3.2:3b`, `gemma3`, `deepseek-r1:7b`, `gpt-oss`…), each mapped to a fixed repo from a known publisher.
+
+**Coming from Ollama?** The models it already downloaded show up in lair under the same names, read from `~/.ollama/models` (or `OLLAMA_MODELS`) without a second copy. lair never deletes them; Ollama's vision models load without their image projector.
 
 ```bash
 curl localhost:8080/api/chat -d '{

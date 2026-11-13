@@ -242,6 +242,8 @@ impl ModelArgs {
     fn resolve(&mut self, data: &std::path::Path) -> Result<()> {
         if self.models.is_empty() {
             self.models.push(models_dir(Some(data.join("models")))?);
+            // Models Ollama already downloaded run here too, with no second copy.
+            self.models.extend(engine::ollama_dir().filter(|d| d.join("manifests").is_dir()));
         }
         Ok(())
     }
@@ -251,6 +253,7 @@ impl ModelArgs {
         let mut found = Vec::new();
         for p in &self.models {
             let _ = engine::collect_gguf(p, &mut found);
+            found.extend(engine::ollama_models(p).into_iter().map(|(_, blob)| blob));
         }
         if !found.is_empty() || self.default_model.is_empty() {
             return Ok(());

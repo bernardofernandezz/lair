@@ -226,6 +226,57 @@ fn model_id(name: &str) -> &str {
     shard_of(name).map_or_else(|| name.trim_end_matches(".gguf"), |(base, _, _)| base)
 }
 
+/// Names from Ollama's library and the Hugging Face repo each one means here: a fixed list of known
+/// publishers, never a search, so a name can't be squatted into choosing what gets downloaded.
+/// A name without a tag is Ollama's default size.
+const OLLAMA_LIBRARY: &[(&str, &str)] = &[
+    ("qwen3:0.6b", "Qwen/Qwen3-0.6B-GGUF"),
+    ("qwen3:1.7b", "Qwen/Qwen3-1.7B-GGUF"),
+    ("qwen3:4b", "Qwen/Qwen3-4B-GGUF"),
+    ("qwen3", "Qwen/Qwen3-8B-GGUF"),
+    ("qwen3:8b", "Qwen/Qwen3-8B-GGUF"),
+    ("qwen3:14b", "Qwen/Qwen3-14B-GGUF"),
+    ("qwen3:30b", "Qwen/Qwen3-30B-A3B-GGUF"),
+    ("qwen3:32b", "Qwen/Qwen3-32B-GGUF"),
+    ("qwen2.5-coder:1.5b", "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF"),
+    ("qwen2.5-coder", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"),
+    ("qwen2.5-coder:7b", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"),
+    ("qwen2.5-coder:14b", "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF"),
+    ("qwen2.5-coder:32b", "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF"),
+    ("qwen2.5vl", "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF"),
+    ("qwen2.5vl:7b", "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF"),
+    ("llama3.2:1b", "bartowski/Llama-3.2-1B-Instruct-GGUF"),
+    ("llama3.2", "bartowski/Llama-3.2-3B-Instruct-GGUF"),
+    ("llama3.2:3b", "bartowski/Llama-3.2-3B-Instruct-GGUF"),
+    ("llama3.1", "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"),
+    ("llama3.1:8b", "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"),
+    ("gemma3:1b", "ggml-org/gemma-3-1b-it-GGUF"),
+    ("gemma3", "ggml-org/gemma-3-4b-it-GGUF"),
+    ("gemma3:4b", "ggml-org/gemma-3-4b-it-GGUF"),
+    ("gemma3:12b", "ggml-org/gemma-3-12b-it-GGUF"),
+    ("gemma3:27b", "ggml-org/gemma-3-27b-it-GGUF"),
+    ("mistral", "bartowski/Mistral-7B-Instruct-v0.3-GGUF"),
+    ("mistral:7b", "bartowski/Mistral-7B-Instruct-v0.3-GGUF"),
+    ("phi4", "bartowski/phi-4-GGUF"),
+    ("phi4:14b", "bartowski/phi-4-GGUF"),
+    ("deepseek-r1:1.5b", "bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF"),
+    ("deepseek-r1:7b", "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"),
+    ("deepseek-r1:14b", "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF"),
+    ("deepseek-r1:32b", "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF"),
+    ("gpt-oss", "ggml-org/gpt-oss-20b-GGUF"),
+    ("gpt-oss:20b", "ggml-org/gpt-oss-20b-GGUF"),
+    ("gpt-oss:120b", "ggml-org/gpt-oss-120b-GGUF"),
+    ("nomic-embed-text", "nomic-ai/nomic-embed-text-v1.5-GGUF"),
+    ("bge-m3", crate::memory::EMBED_REPO),
+];
+
+/// The repo an Ollama library name (`qwen3`, `llama3.2:3b`, `gemma3:latest`) stands for, if lair knows it.
+pub fn ollama_repo(name: &str) -> Option<&'static str> {
+    let name = name.trim().to_ascii_lowercase();
+    let name = name.strip_suffix(":latest").unwrap_or(&name);
+    OLLAMA_LIBRARY.iter().find(|(n, _)| *n == name).map(|(_, repo)| *repo)
+}
+
 /// `owner/name`, each part starting with a letter or digit: never a path that climbs out.
 pub fn check_repo(repo: &str) -> Result<()> {
     let ok = |part: &str| {
@@ -383,9 +434,10 @@ pub async fn plan(
     models: &Path,
     token: Option<&str>,
 ) -> Result<(String, PathBuf, Vec<Remote>)> {
-    let (name, quant) = match spec.rsplit_once(':') {
-        Some((n, q)) => (n, Some(q.to_ascii_uppercase())),
-        None => (spec, None),
+    let (name, quant) = match (ollama_repo(spec), spec.rsplit_once(':')) {
+        (Some(repo), _) => (repo, None),
+        (None, Some((n, q))) => (n, Some(q.to_ascii_uppercase())),
+        (None, None) => (spec, None),
     };
     let repo = if name.contains('/') {
         name.to_owned()
@@ -765,6 +817,10 @@ mod tests {
     #[test]
     fn names_from_the_network_cannot_climb_out_of_the_models_folder() {
         assert!(check_repo("Qwen/Qwen3-8B-GGUF").is_ok());
+        assert_eq!(ollama_repo("Qwen3:Latest"), Some("Qwen/Qwen3-8B-GGUF"));
+        assert_eq!(ollama_repo("llama3.2:1b"), Some("bartowski/Llama-3.2-1B-Instruct-GGUF"));
+        assert_eq!(ollama_repo("llama3"), None);
+        assert!(OLLAMA_LIBRARY.iter().all(|(_, repo)| check_repo(repo).is_ok()));
         assert!(check_repo("bartowski/Llama-3.2-3B-Instruct-GGUF").is_ok());
         for bad in ["..", "../x", "a/..", "a/b/c", "a", "/etc", "a/.hidden", "a/b c", "a/"] {
             assert!(check_repo(bad).is_err(), "{bad}");

@@ -455,12 +455,15 @@ async fn remove(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
 }
 
 /// What `ollama pull <name>` means here: a Hugging Face GGUF repo, `owner/repo` or `owner/repo:QUANT`
-/// (an `hf.co/` prefix, as Ollama writes them, is fine). A bare name like `llama3` belongs to
-/// Ollama's own library, which lair doesn't mirror, and guessing a repo for it would let anyone who
-/// names a repo that way choose what gets downloaded. URLs are refused: the server downloads from
+/// (an `hf.co/` prefix, as Ollama writes them, is fine), or a name from Ollama's library that
+/// [`hub::ollama_repo`] knows. Other bare names are refused: guessing a repo for them would let anyone
+/// who names a repo that way choose what gets downloaded. URLs are refused: the server downloads from
 /// Hugging Face only.
 fn pull_spec(name: &str) -> Result<(String, Option<String>), String> {
     let name = name.trim();
+    if let Some(repo) = hub::ollama_repo(name) {
+        return Ok((repo.to_owned(), None));
+    }
     let name = ["https://huggingface.co/", "huggingface.co/", "hf.co/"]
         .iter()
         .find_map(|p| name.strip_prefix(p))
@@ -472,7 +475,7 @@ fn pull_spec(name: &str) -> Result<(String, Option<String>), String> {
     match hub::check_repo(repo) {
         Ok(()) => Ok((repo.to_owned(), quant)),
         Err(_) => Err(format!(
-            "\"{name}\" is not a Hugging Face repo; lair pulls GGUF repos by owner/name, e.g. Qwen/Qwen3-4B-GGUF"
+            "\"{name}\" is not a Hugging Face repo or a known Ollama name; lair pulls GGUF repos by owner/name, e.g. Qwen/Qwen3-4B-GGUF"
         )),
     }
 }
@@ -595,13 +598,14 @@ mod tests {
     }
 
     #[test]
-    fn pull_takes_hugging_face_repos_only() {
+    fn pull_takes_hugging_face_repos_and_known_ollama_names() {
         assert_eq!(pull_spec("Qwen/Qwen3-4B-GGUF"), Ok(("Qwen/Qwen3-4B-GGUF".into(), None)));
         assert_eq!(
             pull_spec("hf.co/Qwen/Qwen3-4B-GGUF:Q5_K_M"),
             Ok(("Qwen/Qwen3-4B-GGUF".into(), Some("Q5_K_M".into())))
         );
         assert_eq!(pull_spec("a/b:latest"), Ok(("a/b".into(), None)));
+        assert_eq!(pull_spec("qwen3:latest"), Ok(("Qwen/Qwen3-8B-GGUF".into(), None)));
         for bad in ["llama3", "llama3:8b", "https://evil.example/m.gguf", "http://10.0.0.1/a/b", "../x/y", ""] {
             assert!(pull_spec(bad).is_err(), "{bad}");
         }
