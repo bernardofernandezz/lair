@@ -5,6 +5,7 @@
 - Anthropic API: `/v1/messages` (streaming, tools, thinking, images) and `/v1/messages/count_tokens`,
   so Claude Code and other Anthropic clients run on local models. `x-api-key` is accepted as the
   token, and `claude-…` model names mean `auto`.
+- The agent takes up to 20 tool steps per reply instead of 8; `--max-steps` (`LAIR_MAX_STEPS`) sets it.
 
 ## 1.0.0
 

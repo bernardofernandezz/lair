@@ -34,6 +34,9 @@ pub struct Config {
     /// Chats recall related past conversations and workspace files; unset means yes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<bool>,
+    /// Tool steps the agent may take in one reply; unset means [`crate::agent::MAX_STEPS`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<usize>,
 }
 
 impl Config {
@@ -50,6 +53,7 @@ impl Config {
             trust_tailnet: self.trust_tailnet.or(saved.trust_tailnet),
             hf_token: self.hf_token.clone().or_else(|| saved.hf_token.clone()),
             memory: self.memory.or(saved.memory),
+            max_steps: self.max_steps.or(saved.max_steps),
         }
     }
 
@@ -107,6 +111,9 @@ impl Config {
         if peers.len() > 64 {
             bail!("at most 64 peers");
         }
+        if self.max_steps.is_some_and(|n| !(1..=200).contains(&n)) {
+            bail!("the agent's step limit must be from 1 to 200");
+        }
         Ok(Config {
             searxng: url(self.searxng, "the SearXNG URL")?,
             skills_index: url(self.skills_index, "the skills index")?,
@@ -116,6 +123,7 @@ impl Config {
             trust_tailnet: self.trust_tailnet,
             hf_token: text(self.hf_token),
             memory: self.memory,
+            max_steps: self.max_steps,
         })
     }
 }
@@ -155,6 +163,7 @@ mod tests {
         assert_eq!((c.searxng, c.name.as_deref(), c.peers), (None, Some("doom"), vec!["10.0.0.1:8080".to_owned()]));
         for bad in [
             Config { searxng: Some("localhost:8888".into()), ..Default::default() },
+            Config { max_steps: Some(0), ..Default::default() },
             Config { peers: vec!["http://doom".into()], ..Default::default() },
             Config { peers: vec!["doom:70000".into()], ..Default::default() },
             Config { name: Some("x".repeat(65)), ..Default::default() },

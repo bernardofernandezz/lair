@@ -141,7 +141,7 @@ If you set `LAIR_TOKEN`, clients must send it as `Authorization: Bearer <token>`
 
 ### Agent mode
 
-Switch on **Agent** in the composer and the model can act instead of only writing. It calls a tool, lair runs it and hands back the result, up to 8 steps per reply. Each step shows up in the chat as a card.
+Switch on **Agent** in the composer and the model can act instead of only writing. It calls a tool, lair runs it and hands back the result, up to 20 steps per reply (`--max-steps` or `LAIR_MAX_STEPS` changes that). Each step shows up in the chat as a card.
 
 | Tool | What it does | Asks first |
 | --- | --- | :---: |

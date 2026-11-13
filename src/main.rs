@@ -124,6 +124,9 @@ enum Cmd {
         /// Hugging Face token, for downloading gated or private models
         #[arg(long, env = "HF_TOKEN", hide_env_values = true)]
         hf_token: Option<String>,
+        /// Tool steps the agent may take in one reply (default: 20)
+        #[arg(long, env = "LAIR_MAX_STEPS", value_parser = clap::value_parser!(u16).range(1..=200))]
+        max_steps: Option<u16>,
         #[command(flatten)]
         network: NetworkArgs,
     },
@@ -508,7 +511,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { mut model, skills, host, port, token, data, workspace, searxng, hf_token, network } => {
+        Cmd::Serve { mut model, skills, host, port, token, data, workspace, searxng, hf_token, max_steps, network } => {
             if token.is_none() && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
                 eprintln!("warning: serving on {host} without --token; anyone who can reach it can use it");
             }
@@ -528,6 +531,7 @@ async fn main() -> Result<()> {
                 trust_tailnet: None,
                 hf_token: hf_token.filter(|t| !t.is_empty()),
                 memory: None,
+                max_steps: max_steps.map(usize::from),
             };
             let config = flags.over(&saved);
             model.resolve(&data)?;
