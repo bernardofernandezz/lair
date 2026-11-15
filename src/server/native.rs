@@ -347,12 +347,24 @@ struct DownloadRequest {
     file: String,
 }
 
-/// Starts a download, or continues one that stopped: what was already fetched is kept.
-async fn hub_download(State(s): S, Json(r): Json<DownloadRequest>) -> ApiResult<StatusCode> {
+#[derive(Deserialize)]
+struct StartRequest {
+    repo: String,
+    /// Absent: the file `quant` names, else the best for this machine.
+    file: Option<String>,
+    quant: Option<String>,
+}
+
+/// Starts a download, or continues one that stopped: what was already fetched is kept. Answers the file.
+async fn hub_download(State(s): S, Json(r): Json<StartRequest>) -> ApiResult<Json<Value>> {
     hub::check_repo(&r.repo).map_err(bad)?;
-    download::start(s.lair.clone(), r.repo, r.file).await.map_err(bad)?;
+    let file = match r.file {
+        Some(f) => f,
+        None => hub::choose(&s.lair, &r.repo, r.quant.as_deref()).await.map_err(bad)?,
+    };
+    download::start(s.lair.clone(), r.repo, file.clone()).await.map_err(bad)?;
     // Started, not done: progress is polled from GET /hub/downloads.
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({ "file": file })))
 }
 
 async fn hub_cancel(State(s): S, Query(r): Query<DownloadRequest>) -> ApiResult<StatusCode> {

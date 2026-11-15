@@ -79,6 +79,12 @@ enum Cmd {
         model: String,
         #[command(flatten)]
         dir: ModelsDir,
+        /// Download onto this node of the tailnet instead, through the running `lair serve`
+        #[arg(long)]
+        node: Option<String>,
+        /// The `lair serve` that passes a --node download on
+        #[arg(long, env = "LAIR_URL", default_value = "http://127.0.0.1:8080")]
+        server: String,
     },
     /// Delete a model from the models folder
     #[command(visible_alias = "remove")]
@@ -300,7 +306,10 @@ async fn main() -> Result<()> {
             tokio::task::block_in_place(|| bench::run(engine, &id, &params, &store))
         }
         Cmd::Update => update::run().await,
-        Cmd::Pull { model, dir } => cli::pull(&model, &dir.resolve(data)?, token.as_deref()).await,
+        Cmd::Pull { model, node: Some(node), server, .. } => {
+            cli::pull_on(&server, &node, &model, std::env::var("LAIR_TOKEN").ok().as_deref()).await
+        }
+        Cmd::Pull { model, dir, .. } => cli::pull(&model, &dir.resolve(data)?, token.as_deref()).await,
         Cmd::Rm { name, dir } => cli::rm(&name, &dir.resolve(data)?),
         Cmd::List { dir } => cli::list(&dir.resolve(data)?),
         Cmd::Serve { mut model, skills, host, port, token: api_token, workspace, searxng, max_steps, network } => {

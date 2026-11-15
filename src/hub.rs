@@ -466,16 +466,21 @@ pub fn is_hf(url: &str) -> bool {
     url.starts_with(&format!("{HF}/"))
 }
 
+/// The repo a [`Wanted`] name means: itself when it is `owner/repo`, else the GGUF repo Hugging Face
+/// finds for it, the one called exactly that first.
+pub async fn repo_named(http: &reqwest::Client, name: String) -> Result<String> {
+    if name.contains('/') {
+        return Ok(name);
+    }
+    let found = search(http, &name).await?;
+    let pick = found.iter().find(|r| r.id.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(&name)));
+    Ok(pick.or(found.first()).with_context(|| format!("no GGUF repo on Hugging Face matches {name:?}"))?.id.clone())
+}
+
 /// What `lair pull <spec>` downloads (see [`wanted`]); a bare name is searched for on Hugging Face.
 pub async fn plan(http: &reqwest::Client, spec: &str, models: &Path, token: Option<&str>) -> Result<Plan> {
     let Wanted { name, quant } = wanted(spec);
-    let repo = if name.contains('/') {
-        name
-    } else {
-        let found = search(http, &name).await?;
-        let pick = found.iter().find(|r| r.id.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(&name)));
-        pick.or(found.first()).with_context(|| format!("no GGUF repo on Hugging Face matches {name:?}"))?.id.clone()
-    };
+    let repo = repo_named(http, name).await?;
     let listed = group(tree(http, &repo, token).await?);
     let hw = hardware();
     let judged = judge(&listed, &hw, &[], None, |_, _| None);

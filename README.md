@@ -75,6 +75,7 @@ lair pull Qwen/Qwen3-8B-GGUF            # the quant that fits your GPU or RAM
 lair pull Qwen/Qwen3-8B-GGUF:Q5_K_M     # ...or the one you name
 lair pull Qwen3-8B-GGUF                 # a bare name is searched on Hugging Face
 lair pull https://example.com/m.gguf    # any .gguf link
+lair pull Qwen/Qwen3-8B-GGUF --node box  # onto the tailnet node `box`, picked for its hardware
 ```
 
 Vision models come with their projector (`mmproj`), so they can see images right away. Downloads from Hugging Face are checked against the hash it publishes, an interrupted one continues where it stopped when you start it again, and models split into several files come down whole. Gated and private repos need a token: set `HF_TOKEN`, or save one in **Settings → General**.
