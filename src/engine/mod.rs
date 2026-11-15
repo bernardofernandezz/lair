@@ -16,10 +16,17 @@ use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
 use llama_cpp_2::mtmd::{MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-const OPEN: &str = "<think>";
-const CLOSE: &str = "</think>";
+use crate::generation::{Done, Finish, Msg, Params, Part, Reasoning};
+use crate::gguf::{self, Meta};
+use crate::ollama_store;
+
+mod text;
+use text::{StopCut, ThinkSplit, Utf8Buf};
+
+pub(crate) const OPEN: &str = "<think>";
+pub(crate) const CLOSE: &str = "</think>";
 /// What we feed the model to end its reasoning block for it.
 const FORCED_CLOSE: &str = "\n\n</think>\n\n";
 /// Thinking tokens allowed in `Reasoning::Light` before the block is closed for the model.
@@ -27,7 +34,7 @@ const LIGHT_BUDGET: usize = 512;
 
 /// The context a model gets when nothing says otherwise and memory is not measured (no GPU); also the
 /// least a GPU fit may shrink it to, so history trimmed for it always fits.
-const CTX_FLOOR: u32 = 8192;
+pub const CTX_FLOOR: u32 = 8192;
 /// The most context picked automatically; `--ctx` goes past it.
 const CTX_CAP: u32 = 32768;
 /// Tokens decoded per call; a batch as big as a 32k context would waste memory.
@@ -35,201 +42,9 @@ const BATCH: u32 = 2048;
 /// GPU memory left free on each device when fitting: the desktop, the driver and other apps use some.
 const VRAM_MARGIN: usize = 1 << 30;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Msg {
-    pub role: String,
-    pub content: String,
-    /// Image files shown to a vision model with this message. Local paths only: never read from or
-    /// sent over the wire, so no API client or peer can point the engine at a file.
-    #[serde(skip)]
-    pub images: Vec<PathBuf>,
-}
-
-/// Appends `extra` to the first system message, or adds one at the start.
-pub fn with_system(msgs: &[Msg], extra: &str) -> Vec<Msg> {
-    let mut out = msgs.to_vec();
-    match out.iter_mut().find(|m| m.role == "system") {
-        Some(sys) if sys.content.is_empty() => sys.content = extra.into(),
-        Some(sys) => sys.content = format!("{}\n\n{extra}", sys.content),
-        None => out.insert(0, Msg { role: "system".into(), content: extra.into(), ..Default::default() }),
-    }
-    out
-}
-
-/// How much a reasoning model may think. Deserializes from the chat API's `reasoning_effort` values.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
-pub enum Reasoning {
-    #[serde(rename = "none")]
-    Off,
-    #[serde(rename = "low", alias = "minimal")]
-    Light,
-    #[default]
-    #[serde(rename = "high", alias = "medium")]
-    Deep,
-}
-
-impl std::fmt::Display for Reasoning {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let v = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
-        f.write_str(v.as_str().unwrap_or_default())
-    }
-}
-
-impl std::str::FromStr for Reasoning {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, String> {
-        serde_json::from_value(serde_json::Value::String(s.into())).map_err(|_| "expected none, low or high".into())
-    }
-}
-
-/// The fields after `reasoning` are absent from what older peers send; their defaults turn them off.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Params {
-    pub temperature: f32,
-    pub top_p: f32,
-    /// Counts thinking and answer tokens together.
-    pub max_tokens: usize,
-    /// `None` picks a fresh random seed per generation.
-    pub seed: Option<u32>,
-    pub reasoning: Reasoning,
-    /// 0 keeps every candidate.
-    #[serde(default)]
-    pub top_k: i32,
-    #[serde(default)]
-    pub min_p: f32,
-    /// 0 or 1 leaves repeated tokens alone.
-    #[serde(default)]
-    pub repeat_penalty: f32,
-    /// The answer ends before the first of these it would contain.
-    #[serde(default)]
-    pub stop: Vec<String>,
-    /// GBNF the answer must match (see [`schema_grammar`]). Turns reasoning off: a thought is not in the grammar.
-    #[serde(default)]
-    pub grammar: Option<String>,
-    /// The prompt is the messages' text as it is, with no chat template: plain completion.
-    #[serde(default)]
-    pub raw: bool,
-}
-
 /// The grammar that makes an answer match a JSON schema; `{}` accepts any JSON value.
 pub fn schema_grammar(schema: &serde_json::Value) -> Result<String> {
     llama_cpp_2::json_schema_to_grammar(&schema.to_string()).map_err(|e| anyhow!("unusable JSON schema: {e}"))
-}
-
-/// A piece of generated text, already sorted into the model's reasoning or its answer.
-#[derive(Debug, PartialEq)]
-pub enum Part<'a> {
-    Thinking(&'a str),
-    Answer(&'a str),
-}
-
-/// The timings are absent from what older peers send.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
-pub struct Done {
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
-    pub finish_reason: Finish,
-    /// Prompt tokens that were already in the context from the previous turn.
-    #[serde(default)]
-    pub cached_tokens: usize,
-    /// Microseconds spent loading the model (0 when it was in memory), reading the prompt and generating.
-    #[serde(default)]
-    pub load_us: u64,
-    #[serde(default)]
-    pub prompt_us: u64,
-    #[serde(default)]
-    pub gen_us: u64,
-}
-
-impl Done {
-    /// Generated tokens per second; 0 when nothing was timed.
-    pub fn tps(&self) -> f32 {
-        if self.gen_us == 0 { 0.0 } else { self.completion_tokens as f32 * 1e6 / self.gen_us as f32 }
-    }
-}
-
-/// Why a generation ended, in the chat API's words.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Finish {
-    /// The model ended its answer, or the caller stopped it.
-    #[default]
-    Stop,
-    /// It hit `max_tokens` or the context size.
-    Length,
-    /// It stopped to call a tool a chat API client offered.
-    #[serde(rename = "tool_calls")]
-    ToolCalls,
-}
-
-/// What a GGUF says about itself.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Meta {
-    /// `general.architecture`: qwen3, gemma3, llama, bert…
-    pub arch: String,
-    /// Transformer blocks; llama.cpp offloads these plus the output layer.
-    pub layers: u32,
-    /// The context it was trained with.
-    pub ctx_train: u32,
-    pub params: u64,
-    /// `Q4_K_M` and the like; empty when the file doesn't say.
-    pub quant: String,
-    /// An embedding model (it declares a pooling type): turns text into vectors, doesn't chat.
-    pub embedding: bool,
-}
-
-/// `general.file_type` (llama.cpp's `llama_ftype`) as the name people know.
-fn quant_name(ftype: u32) -> &'static str {
-    match ftype {
-        0 => "F32",
-        1 => "F16",
-        2 => "Q4_0",
-        3 => "Q4_1",
-        7 => "Q8_0",
-        8 => "Q5_0",
-        9 => "Q5_1",
-        10 => "Q2_K",
-        11 => "Q3_K_S",
-        12 => "Q3_K_M",
-        13 => "Q3_K_L",
-        14 => "Q4_K_S",
-        15 => "Q4_K_M",
-        16 => "Q5_K_S",
-        17 => "Q5_K_M",
-        18 => "Q6_K",
-        19 => "IQ2_XXS",
-        20 => "IQ2_XS",
-        21 => "Q2_K_S",
-        22 => "IQ3_XS",
-        23 => "IQ3_XXS",
-        24 => "IQ1_S",
-        25 => "IQ4_NL",
-        26 => "IQ3_S",
-        27 => "IQ3_M",
-        28 => "IQ2_S",
-        29 => "IQ2_M",
-        30 => "IQ4_XS",
-        31 => "IQ1_M",
-        32 => "BF16",
-        36 => "TQ1_0",
-        37 => "TQ2_0",
-        _ => "",
-    }
-}
-
-/// Reads [`Meta`] through `get`, which looks a metadata key up.
-fn meta_from(get: impl Fn(&str) -> Option<String>, params: u64) -> Meta {
-    let arch = get("general.architecture").unwrap_or_default();
-    let num = |key: &str| get(&format!("{arch}.{key}")).and_then(|v| v.parse().ok()).unwrap_or(0);
-    Meta {
-        layers: num("block_count"),
-        ctx_train: num("context_length"),
-        params,
-        quant: get("general.file_type").and_then(|v| v.parse().ok()).map_or("", quant_name).to_owned(),
-        embedding: get(&format!("{arch}.pooling_type")).is_some(),
-        arch,
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -244,54 +59,6 @@ pub struct ModelInfo {
     pub meta: Meta,
     /// Bytes on disk, every part of a split model counted.
     pub size: u64,
-}
-
-/// One streamed piece of a generation. The stream always ends with `Done` or `Failed`. Peers send
-/// these to each other as server-sent events named after the variant.
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "event", content = "data", rename_all = "snake_case")]
-pub enum Event {
-    Thinking { text: String },
-    Answer { text: String },
-    Done(Done),
-    Failed { message: String },
-}
-
-/// A model as the APIs list it. Peers on older versions send only the first fields.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ModelEntry {
-    /// `model` for local ones, `model@node` for a peer's.
-    pub id: String,
-    /// The peer it runs on; `None` here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
-    pub thinks: bool,
-    pub loaded: bool,
-    /// Sees images (a projector was found next to it).
-    #[serde(default)]
-    pub vision: bool,
-    /// File size in bytes, to show and to judge whether it fits.
-    #[serde(default)]
-    pub size: u64,
-    /// Context size in tokens it runs with (what it will get, until it is loaded).
-    #[serde(default)]
-    pub ctx: u32,
-    /// The GGUF's architecture, parameter count and quantization.
-    #[serde(default)]
-    pub family: String,
-    #[serde(default)]
-    pub params: u64,
-    #[serde(default)]
-    pub quant: String,
-    /// Turns text into vectors instead of chatting.
-    #[serde(default)]
-    pub embedding: bool,
-    /// Tokens per second: measured here, or estimated from other models measured here; 0 when unknown.
-    #[serde(default)]
-    pub tps: f32,
-    /// `tps` was measured running this very model.
-    #[serde(default)]
-    pub measured: bool,
 }
 
 /// What the command line fixes for every model; `None` lets lair pick per model.
@@ -316,6 +83,13 @@ pub struct LoadedInfo {
     /// Seconds until it is unloaded for being idle; `None` keeps it until memory is needed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
+}
+
+impl LoadedInfo {
+    /// The share of its layers on the GPU.
+    pub fn offload(&self) -> f32 {
+        self.gpu_layers as f32 / self.layers.max(1) as f32
+    }
 }
 
 /// A loaded model's one context, reused across generations instead of allocated for each.
@@ -404,7 +178,7 @@ fn victim(slots: &[(Instant, bool)]) -> Option<usize> {
 }
 
 /// Threads for a machine with `logical` cores: the physical ones, as hyperthreads slow llama.cpp down.
-// ponytail: assumes two threads per core; read the topology if hybrid or SMT-less CPUs get a bad count.
+// shortcut: assumes two threads per core; read the topology if hybrid or SMT-less CPUs get a bad count.
 fn threads(logical: usize) -> i32 {
     (logical / 2).clamp(1, 16) as i32
 }
@@ -563,7 +337,7 @@ impl Engine {
                 Ok(None) => {
                     evict();
                 }
-                // ponytail: a backend that can't report free memory (Vulkan without the memory-budget
+                // shortcut: a backend that can't report free memory (Vulkan without the memory-budget
                 // extension) fits as if nothing were loaded; the load then fails and lands here. One that
                 // oversubscribes instead of failing just runs slow: keep a VRAM ledger if that shows up.
                 Err(e) => {
@@ -872,87 +646,34 @@ impl Engine {
     }
 }
 
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+}
+
 /// `v` scaled to length 1, so a dot product of two is their cosine.
 fn normalized(v: &[f32]) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm == 0.0 { v.to_vec() } else { v.iter().map(|x| x / norm).collect() }
 }
 
-/// Cuts streamed text before the first stop sequence, holding back what could be the start of one.
-struct StopCut {
-    stops: Vec<String>,
-    pending: String,
-}
-
-impl StopCut {
-    fn new(stops: &[String]) -> Self {
-        Self { stops: stops.iter().filter(|s| !s.is_empty()).cloned().collect(), pending: String::new() }
-    }
-
-    /// The text safe to show, and whether a stop sequence was reached (nothing follows then).
-    fn push(&mut self, text: &str) -> (String, bool) {
-        if self.stops.is_empty() {
-            return (text.to_owned(), false);
-        }
-        self.pending.push_str(text);
-        if let Some(at) = self.stops.iter().filter_map(|s| self.pending.find(s.as_str())).min() {
-            self.pending.truncate(at);
-            return (std::mem::take(&mut self.pending), true);
-        }
-        let keep = self.stops.iter().map(|s| partial_suffix(&self.pending, s)).max().unwrap_or(0);
-        let rest = self.pending.split_off(self.pending.len() - keep);
-        (std::mem::replace(&mut self.pending, rest), false)
-    }
-
-    /// What was held back and turned out not to be a stop sequence.
-    fn finish(&mut self) -> String {
-        std::mem::take(&mut self.pending)
-    }
-}
-
-/// `name` as a part of a split model: its base name, part number and part count
-/// (`m-00001-of-00003.gguf` is part 1 of 3 of `m`). llama.cpp loads every part from the first.
-pub fn shard_of(name: &str) -> Option<(&str, u32, u32)> {
-    let (rest, total) = name.strip_suffix(".gguf")?.rsplit_once("-of-")?;
-    let (base, index) = rest.rsplit_once('-')?;
-    let digits = |s: &str| s.len() == 5 && s.bytes().all(|c| c.is_ascii_digit());
-    (digits(index) && digits(total) && !base.is_empty()).then(|| (base, index.parse().unwrap(), total.parse().unwrap()))
-}
-
-/// The file name of part `index` of `total` of the split model `base`.
-pub fn shard_name(base: &str, index: u32, total: u32) -> String {
-    format!("{base}-{index:05}-of-{total:05}.gguf")
-}
-
 /// Every usable model under `paths`. Files already in `known` are not probed again.
 fn scan(backend: &LlamaBackend, paths: &[PathBuf], known: &[ModelInfo]) -> Vec<ModelInfo> {
     let mut files = Vec::new();
     for p in paths {
-        if let Err(e) = collect_gguf(p, &mut files) {
+        if let Err(e) = gguf::collect_gguf(p, &mut files) {
             eprintln!("reading {}: {e}", p.display());
         }
     }
     files.sort();
-    let (projectors, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| is_mmproj(p));
-    let ollama = paths.iter().flat_map(|p| ollama_models(p)).map(|(id, path)| (path, Some(id)));
+    let (projectors, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| gguf::is_mmproj(&file_name(p)));
+    let ollama = paths.iter().flat_map(|p| ollama_store::models(p)).map(|(id, path)| (path, Some(id)));
     let mut catalog: Vec<ModelInfo> = Vec::new();
     for (path, named) in files.into_iter().map(|p| (p, None)).chain(ollama) {
-        let name = path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-        let (id, size) = match (named, shard_of(&name)) {
-            (Some(id), _) => (id, path.metadata().map_or(0, |m| m.len())),
-            // A split model is listed once, by its first part, and only when every part is there.
-            (None, Some((_, index, _))) if index != 1 => continue,
-            (None, Some((base, _, total))) => {
-                let parts = (1..=total).map(|i| path.with_file_name(shard_name(base, i, total)).metadata());
-                match parts.map(|m| m.map(|m| m.len())).sum::<std::io::Result<u64>>() {
-                    Ok(size) => (base.to_owned(), size),
-                    Err(_) => {
-                        eprintln!("skipping {}: some of its {total} parts are missing", path.display());
-                        continue;
-                    }
-                }
-            }
-            (None, None) => (name.trim_end_matches(".gguf").to_owned(), path.metadata().map_or(0, |m| m.len())),
+        let Some(id) = named.or_else(|| gguf::model_id(&file_name(&path)).map(str::to_owned)) else { continue };
+        let Ok(size) = gguf::parts(&path).iter().map(|p| p.metadata().map(|m| m.len())).sum::<std::io::Result<u64>>()
+        else {
+            eprintln!("skipping {}: some of its parts are missing", path.display());
+            continue;
         };
         if catalog.iter().any(|m| m.id == id) {
             eprintln!("skipping {}: another model is already called {id}", path.display());
@@ -969,75 +690,9 @@ fn scan(backend: &LlamaBackend, paths: &[PathBuf], known: &[ModelInfo]) -> Vec<M
     }
     let all: Vec<PathBuf> = catalog.iter().map(|m| m.path.clone()).collect();
     for m in &mut catalog {
-        m.mmproj = projector_for(&m.path, &all, &projectors);
+        m.mmproj = gguf::projector_for(&m.path, &all, &projectors);
     }
     catalog
-}
-
-/// Where Ollama keeps its models: `OLLAMA_MODELS`, or `.ollama/models` in the home folder.
-pub fn ollama_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("OLLAMA_MODELS") {
-        return Some(dir.into());
-    }
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
-    Some(Path::new(&home).join(".ollama").join("models"))
-}
-
-/// The models in an Ollama store, by the names Ollama gives them (`qwen3:8b`, `hf.co/owner/repo:Q4_K_M`).
-/// Its manifests name the GGUF blob each one runs on; the blobs have no `.gguf` to be found by.
-// shortcut: a vision model's projector layer is not read, so it loads without seeing; read
-// `application/vnd.ollama.image.projector` too if Ollama vision models matter.
-pub(crate) fn ollama_models(root: &Path) -> Vec<(String, PathBuf)> {
-    let manifests = root.join("manifests");
-    let mut found = Vec::new();
-    let mut stack = vec![manifests.clone()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for path in entries.flatten().map(|e| e.path()) {
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            // manifests/<host>/<namespace…>/<name>/<tag>; Ollama's own `library` namespace is left out.
-            let Ok(rel) = path.strip_prefix(&manifests) else { continue };
-            let parts: Vec<String> = rel.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-            let [host, name @ .., tag] = parts.as_slice() else { continue };
-            if name.is_empty() {
-                continue;
-            }
-            let name = match name {
-                [ns, rest @ ..] if ns == "library" && host == "registry.ollama.ai" => rest.join("/"),
-                _ if host == "registry.ollama.ai" => name.join("/"),
-                _ => format!("{host}/{}", name.join("/")),
-            };
-            let Ok(manifest) = std::fs::read(&path) else { continue };
-            let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap_or_default();
-            let layers = manifest["layers"].as_array().map(Vec::as_slice).unwrap_or_default();
-            let model = layers.iter().find(|l| l["mediaType"] == "application/vnd.ollama.image.model");
-            let Some(hex) = model.and_then(|l| l["digest"].as_str()?.strip_prefix("sha256:")) else { continue };
-            // The digest names a file: never let it climb out of the blobs folder.
-            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-            let blob = root.join("blobs").join(format!("sha256-{hex}"));
-            if blob.is_file() {
-                found.push((format!("{name}:{tag}"), blob));
-            }
-        }
-    }
-    found.sort();
-    found
-}
-
-pub(crate) fn collect_gguf(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            collect_gguf(&entry?.path(), out)?;
-        }
-    } else if path.extension().is_some_and(|e| e == "gguf") {
-        out.push(path.to_owned());
-    }
-    Ok(())
 }
 
 /// Reads only metadata and vocabulary: what kind of model is this, and does it think? A file that
@@ -1045,7 +700,7 @@ pub(crate) fn collect_gguf(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Resu
 fn probe(backend: &LlamaBackend, path: &Path) -> Result<(bool, Meta)> {
     let params = LlamaModelParams::default().with_vocab_only(true);
     let model = LlamaModel::load_from_file(backend, path, &params)?;
-    let meta = meta_from(|key| model.meta_val_str(key).ok(), model.n_params());
+    let meta = gguf::meta_from(|key| model.meta_val_str(key).ok(), model.n_params());
     if meta.embedding {
         return Ok((false, meta));
     }
@@ -1053,26 +708,6 @@ fn probe(backend: &LlamaBackend, path: &Path) -> Result<(bool, Meta)> {
     let in_template = template.to_str().is_ok_and(|t| t.contains(OPEN));
     let special_token = model.vocab().tokenize(OPEN.as_bytes(), false, true).len() == 1;
     Ok((in_template || special_token, meta))
-}
-
-/// Projector files ship next to the weights as `mmproj-*.gguf` (or `*-mmproj-*.gguf`).
-fn is_mmproj(path: &Path) -> bool {
-    path.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj"))
-}
-
-/// The projector for `model`: in its folder, named after it, or the only one there beside a lone model.
-fn projector_for(model: &Path, models: &[PathBuf], projectors: &[PathBuf]) -> Option<PathBuf> {
-    let dir = model.parent();
-    let here: Vec<&PathBuf> = projectors.iter().filter(|p| p.parent() == dir).collect();
-    let stem = model.file_stem()?.to_string_lossy().to_ascii_lowercase();
-    // `Qwen2.5-VL-3B-Q4_K_M` → `qwen2.5-vl-3b`: projectors don't carry the weights' quantization.
-    let base = stem.rsplit_once(['-', '.']).map_or(stem.as_str(), |(b, q)| {
-        if q.starts_with('q') || q.starts_with("f16") || q.starts_with("bf16") { b } else { stem.as_str() }
-    });
-    let named =
-        here.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains(base)));
-    let alone = models.iter().filter(|m| m.parent() == dir).count() == 1 && here.len() == 1;
-    named.or(alone.then(|| &here[0])).map(|p| (*p).clone())
 }
 
 fn render_prompt(model: &LlamaModel, msgs: &[Msg], vision: bool) -> Result<String> {
@@ -1088,274 +723,9 @@ fn render_prompt(model: &LlamaModel, msgs: &[Msg], vision: bool) -> Result<Strin
     Ok(model.apply_chat_template(&tmpl, &chat, true)?)
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum State {
-    /// Nothing but whitespace yet; a `<think>` here opens the reasoning block.
-    Start,
-    Thinking,
-    /// Just closed the block; drop the whitespace models put before the answer.
-    Closed,
-    Answer,
-}
-
-/// Sorts streamed text into reasoning and answer, even when a tag is split across tokens.
-struct ThinkSplit {
-    state: State,
-    pending: String,
-}
-
-impl ThinkSplit {
-    fn new(opened: bool) -> Self {
-        Self { state: if opened { State::Thinking } else { State::Start }, pending: String::new() }
-    }
-
-    fn thinking(&self) -> bool {
-        self.state == State::Thinking
-    }
-
-    fn push(&mut self, text: &str, emit: &mut impl FnMut(Part)) {
-        self.pending.push_str(text);
-        loop {
-            match self.state {
-                State::Start => {
-                    let t = self.pending.trim_start();
-                    if let Some(rest) = t.strip_prefix(OPEN) {
-                        self.pending = rest.to_owned();
-                        self.state = State::Thinking;
-                    } else if OPEN.starts_with(t) {
-                        return;
-                    } else {
-                        self.pending = t.to_owned();
-                        self.state = State::Answer;
-                    }
-                }
-                State::Thinking => {
-                    if let Some(i) = self.pending.find(CLOSE) {
-                        if i > 0 {
-                            emit(Part::Thinking(&self.pending[..i]));
-                        }
-                        self.pending.drain(..i + CLOSE.len());
-                        self.state = State::Closed;
-                    } else {
-                        let keep = partial_suffix(&self.pending, CLOSE);
-                        let n = self.pending.len() - keep;
-                        if n > 0 {
-                            emit(Part::Thinking(&self.pending[..n]));
-                        }
-                        self.pending.drain(..n);
-                        return;
-                    }
-                }
-                State::Closed => {
-                    let t = self.pending.trim_start();
-                    if t.is_empty() {
-                        self.pending.clear();
-                        return;
-                    }
-                    self.pending = t.to_owned();
-                    self.state = State::Answer;
-                }
-                State::Answer => {
-                    // A stray closing tag after the block is never answer text.
-                    while let Some(i) = self.pending.find(CLOSE) {
-                        self.pending.replace_range(i..i + CLOSE.len(), "");
-                    }
-                    let n = self.pending.len() - partial_suffix(&self.pending, CLOSE);
-                    if n > 0 {
-                        emit(Part::Answer(&self.pending[..n]));
-                    }
-                    self.pending.drain(..n);
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Ends the reasoning block early (the caller fed the model a closing tag).
-    fn close(&mut self, emit: &mut impl FnMut(Part)) {
-        if self.state == State::Thinking {
-            if !self.pending.is_empty() {
-                emit(Part::Thinking(&self.pending));
-            }
-            self.pending.clear();
-            self.state = State::Closed;
-        }
-    }
-
-    fn finish(&mut self, emit: &mut impl FnMut(Part)) {
-        let rest = std::mem::take(&mut self.pending);
-        match self.state {
-            State::Thinking if !rest.is_empty() => emit(Part::Thinking(&rest)),
-            State::Start | State::Answer if !rest.trim().is_empty() => emit(Part::Answer(&rest)),
-            _ => {}
-        }
-    }
-}
-
-/// Length of the longest proper prefix of `tag` that `s` ends with.
-pub(crate) fn partial_suffix(s: &str, tag: &str) -> usize {
-    (1..tag.len()).rev().filter(|&k| tag.is_char_boundary(k)).find(|&k| s.ends_with(&tag[..k])).unwrap_or(0)
-}
-
-/// Tokens can split multi-byte UTF-8 characters; hold incomplete bytes until the rest arrives.
-#[derive(Default)]
-struct Utf8Buf(Vec<u8>);
-
-impl Utf8Buf {
-    fn push(&mut self, bytes: &[u8]) -> String {
-        self.0.extend_from_slice(bytes);
-        match std::str::from_utf8(&self.0) {
-            Ok(s) => {
-                let out = s.to_owned();
-                self.0.clear();
-                out
-            }
-            Err(e) if e.error_len().is_none() => {
-                let n = e.valid_up_to();
-                let out = String::from_utf8_lossy(&self.0[..n]).into_owned();
-                self.0.drain(..n);
-                out
-            }
-            Err(_) => String::from_utf8_lossy(&std::mem::take(&mut self.0)).into_owned(),
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    fn split(opened: bool, chunks: &[&str]) -> (String, String) {
-        let (mut thought, mut answer) = (String::new(), String::new());
-        let mut s = ThinkSplit::new(opened);
-        let mut emit = |p: Part| match p {
-            Part::Thinking(t) => thought.push_str(t),
-            Part::Answer(t) => answer.push_str(t),
-        };
-        for c in chunks {
-            s.push(c, &mut emit);
-        }
-        s.finish(&mut emit);
-        (thought, answer)
-    }
-
-    #[test]
-    fn ollama_manifests_name_their_blobs() {
-        let root = std::env::temp_dir().join(format!("lair-ollama-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let manifest = |dir: &str, tag: &str, digest: &str| {
-            let dir = root.join("manifests").join(dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let layers = serde_json::json!({ "layers": [
-                { "mediaType": "application/vnd.ollama.image.template", "digest": "sha256:00" },
-                { "mediaType": "application/vnd.ollama.image.model", "digest": digest }
-            ] });
-            std::fs::write(dir.join(tag), layers.to_string()).unwrap();
-        };
-        std::fs::create_dir_all(root.join("blobs")).unwrap();
-        for hex in ["ab12", "cd34"] {
-            std::fs::write(root.join("blobs").join(format!("sha256-{hex}")), b"GGUF").unwrap();
-        }
-        manifest("registry.ollama.ai/library/qwen3", "8b", "sha256:ab12");
-        manifest("hf.co/bartowski/Some-GGUF", "Q4_K_M", "sha256:cd34");
-        manifest("registry.ollama.ai/library/gone", "latest", "sha256:ef56");
-        manifest("registry.ollama.ai/library/evil", "x", "sha256:../../etc/passwd");
-        let names: Vec<String> = ollama_models(&root).into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["hf.co/bartowski/Some-GGUF:Q4_K_M", "qwen3:8b"]);
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn think_tags_split_across_tokens() {
-        let (t, a) = split(false, &["<th", "ink>", "hm", "m</th", "ink>", "\n\n", "Oi", "!"]);
-        assert_eq!((t.as_str(), a.as_str()), ("hmm", "Oi!"));
-    }
-
-    #[test]
-    fn template_already_opened_the_block() {
-        let (t, a) = split(true, &["plan", "</think>", " done"]);
-        assert_eq!((t.as_str(), a.as_str()), ("plan", "done"));
-    }
-
-    #[test]
-    fn think_tag_after_answer_started_is_text() {
-        let (t, a) = split(false, &["Use ", "<think>", " tags"]);
-        assert_eq!((t.as_str(), a.as_str()), ("", "Use <think> tags"));
-        let (_, a) = split(false, &["Feito.</th", "ink>Pronto"]);
-        assert_eq!(a, "Feito.Pronto", "a stray closing tag is dropped");
-    }
-
-    #[test]
-    fn no_block_and_unfinished_tag() {
-        assert_eq!(split(false, &["  Oi"]), ("".into(), "Oi".into()));
-        assert_eq!(split(false, &["<thi"]), ("".into(), "<thi".into()));
-        assert_eq!(split(false, &["<think>still going"]), ("still going".into(), "".into()));
-    }
-
-    #[test]
-    fn utf8_split_across_tokens() {
-        let mut b = Utf8Buf::default();
-        let e = "é".as_bytes();
-        assert_eq!(b.push(&[b'a', e[0]]), "a");
-        assert_eq!(b.push(&[e[1]]), "é");
-        assert_eq!(b.push(&[0xff]), "\u{fffd}");
-    }
-
-    #[test]
-    fn projector_pairs_by_name_or_lone_folder() {
-        let p = |s: &str| PathBuf::from(s);
-        let models = [p("/m/Qwen2.5-VL-3B-Q4_K_M.gguf"), p("/m/Qwen3-4B-Q4_K_M.gguf"), p("/v/gemma.gguf")];
-        let projs = [p("/m/mmproj-Qwen2.5-VL-3B-f16.gguf"), p("/v/mmproj-model-f16.gguf")];
-        assert_eq!(projector_for(&models[0], &models, &projs), Some(projs[0].clone()));
-        assert_eq!(projector_for(&models[1], &models, &projs), None, "a text model in a shared folder stays text-only");
-        assert_eq!(
-            projector_for(&models[2], &models, &projs),
-            Some(projs[1].clone()),
-            "lone model takes the lone projector"
-        );
-        assert!(is_mmproj(&projs[0]) && !is_mmproj(&models[0]));
-    }
-
-    #[test]
-    fn stop_sequences_cut_the_answer_even_split_across_pieces() {
-        let mut cut = StopCut::new(&["\nUser:".into(), "fim".into()]);
-        let mut shown = String::new();
-        let mut hit = false;
-        for piece in ["Hello", "\nUs", "er", ": more", " never shown"] {
-            let (text, stop) = cut.push(piece);
-            shown.push_str(&text);
-            if stop {
-                hit = true;
-                break;
-            }
-        }
-        assert!(hit);
-        assert_eq!(shown, "Hello");
-        let mut cut = StopCut::new(&["é!".into()]);
-        let (a, _) = cut.push("caf\u{e9}");
-        assert_eq!(a, "caf", "the start of a stop sequence is held back");
-        assert_eq!(cut.finish(), "\u{e9}", "and shown when it turns out not to be one");
-        assert_eq!(StopCut::new(&[]).push("x"), ("x".into(), false));
-    }
-
-    #[test]
-    fn gguf_metadata_is_read_by_architecture() {
-        let get = |key: &str| {
-            let v = match key {
-                "general.architecture" => "qwen3",
-                "qwen3.block_count" => "36",
-                "qwen3.context_length" => "40960",
-                "general.file_type" => "15",
-                _ => return None,
-            };
-            Some(v.to_owned())
-        };
-        let m = meta_from(get, 4_000_000_000);
-        assert_eq!((m.arch.as_str(), m.layers, m.ctx_train, m.quant.as_str()), ("qwen3", 36, 40960, "Q4_K_M"));
-        assert!(!m.embedding);
-        let bert = meta_from(|k| (k == "general.architecture" || k == "bert.pooling_type").then(|| "bert".into()), 0);
-        assert!(bert.embedding && bert.quant.is_empty());
-    }
 
     #[test]
     fn the_idle_model_used_longest_ago_makes_room() {
@@ -1364,14 +734,6 @@ pub(crate) mod tests {
         assert_eq!(victim(&[(ago(5), false), (ago(90), true), (ago(30), false)]), Some(2), "never a busy one");
         assert_eq!(victim(&[(ago(5), true)]), None);
         assert_eq!((threads(1), threads(16), threads(128)), (1, 8, 16));
-    }
-
-    #[test]
-    fn split_models_are_recognized() {
-        assert_eq!(shard_of("Qwen3-235B-Q4_K_M-00001-of-00003.gguf"), Some(("Qwen3-235B-Q4_K_M", 1, 3)));
-        assert_eq!(shard_of("Qwen3-8B-Q4_K_M.gguf"), None);
-        assert_eq!(shard_of("model-of-00003.gguf"), None);
-        assert_eq!(shard_name("m", 2, 3), "m-00002-of-00003.gguf");
     }
 
     #[test]

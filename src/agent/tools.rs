@@ -1,6 +1,8 @@
 //! The tools an agent may call, what each needs from the user, and how each runs.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -8,35 +10,26 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::config::Config;
 use crate::jail;
 use crate::lair::Lair;
-use crate::skills::Manifest;
+use crate::skills::{Catalog, Manifest};
 
 /// Characters of tool output handed back to the model; small models have small contexts.
 const MAX_OUTPUT: usize = 6000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const FETCH_LIMIT: usize = 2 * 1024 * 1024;
 
-/// Which handler runs a call; one per row of [`SPECS`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Tool {
-    ListDir,
-    ReadFile,
-    WriteFile,
-    EditFile,
-    DeleteFile,
-    RunCommand,
-    WebSearch,
-    FetchUrl,
-    SearchConversations,
-    SearchMemory,
-    ReadConversation,
-    ListSkills,
-    SaveSkill,
+/// What a tool's handler works with.
+pub struct Ctx<'l> {
+    pub lair: &'l Lair,
+    /// Web results already numbered in this turn, so citations stay unique across searches.
+    pub sources: &'l mut usize,
 }
 
+type Running<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+
 pub struct Spec {
-    pub tool: Tool,
     /// What the model writes in a call.
     pub name: &'static str,
     /// What the UI shows for a step.
@@ -47,51 +40,74 @@ pub struct Spec {
     pub usage: &'static str,
     /// Changes something or reaches outside this machine, so the user approves each call.
     pub needs_approval: bool,
+    /// What the settings must allow for it to work, and what to say when they don't; a tool that can't
+    /// work isn't offered to the model.
+    ready: fn(&Config) -> Result<(), &'static str>,
+    run: for<'a, 'l> fn(&'a mut Ctx<'l>, &'a Value) -> Running<'a>,
 }
 
-pub const SPECS: &[Spec] = &[
+const NO_SEARXNG: &str = "web search is not set up: set SearXNG in the settings";
+
+fn always(_: &Config) -> Result<(), &'static str> {
+    Ok(())
+}
+
+pub static SPECS: &[Spec] = &[
     Spec {
-        tool: Tool::ListDir,
         name: "list_dir",
         label: "List folder",
         subject: "path",
         usage: r#"lists a folder in the workspace. {"path": "."}"#,
         needs_approval: false,
+        ready: always,
+        run: |c, a| Box::pin(async move { list_dir(&c.lair.workspace, str_arg(a, "path").unwrap_or(".")) }),
     },
     Spec {
-        tool: Tool::ReadFile,
         name: "read_file",
         label: "Read file",
         subject: "path",
         usage: r#"reads a text file from the workspace. {"path": "notes.md"}"#,
         needs_approval: false,
+        ready: always,
+        run: |c, a| Box::pin(async move { read_file(&c.lair.workspace, req(a, "path")?) }),
     },
     Spec {
-        tool: Tool::WriteFile,
         name: "write_file",
         label: "Write file",
         subject: "path",
         usage: r#"creates or replaces a file in the workspace. {"path": "notes.md", "content": "..."}"#,
         needs_approval: true,
+        ready: always,
+        run: |c, a| Box::pin(async move { write_file(&c.lair.workspace, req(a, "path")?, req(a, "content")?) }),
     },
     Spec {
-        tool: Tool::EditFile,
         name: "edit_file",
         label: "Edit file",
         subject: "path",
         usage: r#"replaces an exact piece of a file. {"path": "a.txt", "find": "current text", "replace": "new text"}"#,
         needs_approval: true,
+        ready: always,
+        run: |c, a| {
+            Box::pin(async move {
+                edit_file(&c.lair.workspace, req(a, "path")?, req(a, "find")?, str_arg(a, "replace").unwrap_or(""))
+            })
+        },
     },
     Spec {
-        tool: Tool::DeleteFile,
         name: "delete_file",
         label: "Delete file",
         subject: "path",
         usage: r#"deletes a file from the workspace. {"path": "old.txt"}"#,
         needs_approval: true,
+        ready: always,
+        run: |c, a| {
+            Box::pin(async move {
+                std::fs::remove_file(jail::existing(&c.lair.workspace, req(a, "path")?)?)?;
+                Ok("deleted".into())
+            })
+        },
     },
     Spec {
-        tool: Tool::RunCommand,
         name: "run_command",
         label: "Run command",
         subject: "command",
@@ -101,62 +117,92 @@ pub const SPECS: &[Spec] = &[
             r#"runs a shell command in the workspace folder (60 s at most). {"command": "ls -la"}"#
         },
         needs_approval: true,
+        ready: always,
+        run: |c, a| Box::pin(async move { run_command(&c.lair.workspace, req(a, "command")?).await }),
     },
     Spec {
-        tool: Tool::WebSearch,
         name: "web_search",
         label: "Search the web",
         subject: "query",
         usage: r#"searches the web; each result comes with a number n to cite. {"query": "..."}"#,
         needs_approval: true,
+        ready: |c| c.searxng.as_ref().map(drop).ok_or(NO_SEARXNG),
+        run: |c, a| {
+            Box::pin(async move {
+                let searxng = c.lair.config().searxng.context(NO_SEARXNG)?;
+                web_search(&searxng, &c.lair.http, req(a, "query")?, c.sources).await
+            })
+        },
     },
     Spec {
-        tool: Tool::FetchUrl,
         name: "fetch_url",
         label: "Open page",
         subject: "url",
         usage: r#"downloads a page and returns its text. {"url": "https://..."}"#,
         needs_approval: true,
+        ready: always,
+        run: |c, a| Box::pin(async move { fetch_url(&c.lair.http, req(a, "url")?).await }),
     },
     Spec {
-        tool: Tool::SearchConversations,
         name: "search_conversations",
         label: "Search chats",
         subject: "query",
         usage: r#"searches the user's saved chats. {"query": "..."}"#,
         needs_approval: false,
+        ready: always,
+        run: |c, a| {
+            Box::pin(async move {
+                let hits = c.lair.store.search(req(a, "query")?)?;
+                Ok(if hits.is_empty() { "no chats found".into() } else { serde_json::to_string_pretty(&hits)? })
+            })
+        },
     },
     Spec {
-        tool: Tool::SearchMemory,
         name: "search_memory",
         label: "Search memory",
         subject: "query",
         usage: r#"finds passages of the user's earlier chats and workspace files related to a question, by meaning. {"query": "..."}"#,
         needs_approval: false,
+        ready: |c| if c.memory() { Ok(()) } else { Err(crate::memory::OFF) },
+        run: |c, a| {
+            Box::pin(async move {
+                let hits = crate::memory::recall(c.lair, req(a, "query")?, None, 6).await?;
+                Ok(if hits.is_empty() { "nothing related found".into() } else { serde_json::to_string_pretty(&hits)? })
+            })
+        },
     },
     Spec {
-        tool: Tool::ReadConversation,
         name: "read_conversation",
         label: "Read chat",
         subject: "id",
         usage: r#"reads a saved chat by id. {"id": "..."}"#,
         needs_approval: false,
+        ready: always,
+        run: |c, a| {
+            Box::pin(async move {
+                let id = req(a, "id")?;
+                let conv = c.lair.store.get(id)?.with_context(|| format!("chat {id} does not exist"))?;
+                Ok(format!("# {}\n{}", conv.title, c.lair.store.transcript(id)?))
+            })
+        },
     },
     Spec {
-        tool: Tool::ListSkills,
         name: "list_skills",
         label: "List skills",
         subject: "",
         usage: "lists the skills and their triggers. {}",
         needs_approval: false,
+        ready: always,
+        run: |c, _| Box::pin(async move { Ok(list_skills(&c.lair.skills.read().unwrap())) }),
     },
     Spec {
-        tool: Tool::SaveSkill,
         name: "save_skill",
         label: "Save skill",
         subject: "id",
         usage: r#"creates or replaces a skill (extra instructions triggered by words). {"id": "pirate", "name": "Pirate", "description": "...", "when": ["pirate"], "prompt": "Answer like a pirate."}"#,
         needs_approval: true,
+        ready: always,
+        run: |c, a| Box::pin(async move { save_skill(&mut c.lair.skills.write().unwrap(), a) }),
     },
 ];
 
@@ -164,96 +210,59 @@ pub fn spec(name: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|s| s.name == name)
 }
 
-/// How a model calls a tool; shared by agent mode and the chat API's `tools`.
-pub const PROTOCOL: &str = "# Tools\n\
-     You can act by using tools. To use one, write exactly\n\
-     <tool_call>{\"name\": \"NAME\", \"arguments\": {...}}</tool_call>\n\
-     and stop. The result arrives in a <tool_response> message. Use one tool at a time, \
-     only when needed. If you say you will do something, make the call right away, in the same \
-     reply; don't end the reply just announcing it. With the result in hand, answer the user \
-     normally, without <tool_call>, in the user's language.\n";
-
-/// The instructions that turn a chat model into an agent.
-pub fn system_prompt() -> String {
+/// The instructions that turn a chat model into an agent, offering the tools these settings let work.
+pub fn system_prompt(config: &Config) -> String {
     let mut out = format!(
-        "{PROTOCOL}Paths are relative to the working folder (workspace).\n\
+        "{}Paths are relative to the working folder (workspace).\n\
          When you use information from a web search, cite the source with its number in brackets right \
-         after the passage, like this: [1]. Only cite numbers the search returned.\n\nTools:\n"
+         after the passage, like this: [1]. Only cite numbers the search returned.\n\nTools:\n",
+        super::PROTOCOL
     );
-    for s in SPECS {
+    for s in SPECS.iter().filter(|s| (s.ready)(config).is_ok()) {
         out.push_str(&format!("- {}: {}\n", s.name, s.usage));
     }
     out
 }
 
-/// Runs one call; the text is what the model reads back, already shortened. `sources` counts the web
-/// results already numbered in this turn, so citations stay unique across searches.
-pub async fn run(lair: &Lair, tool: Tool, args: &Value, sources: &mut usize) -> Result<String> {
-    let ws = lair.workspace.as_path();
-    let out = match tool {
-        Tool::ListDir => list_dir(ws, str_arg(args, "path").unwrap_or(".")),
-        Tool::ReadFile => read_file(ws, req(args, "path")?),
-        Tool::WriteFile => write_file(ws, req(args, "path")?, req(args, "content")?),
-        Tool::EditFile => edit_file(ws, req(args, "path")?, req(args, "find")?, str_arg(args, "replace").unwrap_or("")),
-        Tool::DeleteFile => {
-            std::fs::remove_file(jail::existing(ws, req(args, "path")?)?)?;
-            Ok("deleted".into())
-        }
-        Tool::RunCommand => run_command(ws, req(args, "command")?).await,
-        Tool::WebSearch => web_search(lair.config().searxng.as_deref(), &lair.http, req(args, "query")?, sources).await,
-        Tool::FetchUrl => fetch_url(&lair.http, req(args, "url")?).await,
-        Tool::ListSkills => {
-            let catalog = lair.skills.read().unwrap();
-            let lines: Vec<String> = catalog
-                .list()
-                .iter()
-                .map(|s| {
-                    format!(
-                        "- {} ({}): {} [triggers: {}]{}",
-                        s.id,
-                        s.name,
-                        s.description,
-                        s.when.join(", "),
-                        if s.enabled { "" } else { " (disabled)" }
-                    )
-                })
-                .collect();
-            Ok(lines.join("\n"))
-        }
-        Tool::SaveSkill => {
-            let id = req(args, "id")?;
-            let when = args
-                .get("when")
-                .and_then(Value::as_array)
-                .map(|w| w.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-                .unwrap_or_default();
-            let manifest = Manifest {
-                name: req(args, "name")?.to_owned(),
-                description: str_arg(args, "description").unwrap_or("").to_owned(),
-                when,
-                source: None,
-            };
-            lair.skills.write().unwrap().save(id, &manifest, req(args, "prompt")?)?;
-            Ok(format!("skill {id} saved; it runs when the user's message has one of its triggers"))
-        }
-        Tool::SearchConversations => {
-            let hits = lair.store.search(req(args, "query")?)?;
-            Ok(if hits.is_empty() { "no chats found".into() } else { serde_json::to_string_pretty(&hits)? })
-        }
-        Tool::SearchMemory => {
-            if !lair.config().memory() {
-                anyhow::bail!("memory is turned off in the settings");
-            }
-            let hits = crate::memory::recall(lair, req(args, "query")?, None, 6).await?;
-            Ok(if hits.is_empty() { "nothing related found".into() } else { serde_json::to_string_pretty(&hits)? })
-        }
-        Tool::ReadConversation => {
-            let id = req(args, "id")?;
-            let c = lair.store.get(id)?.with_context(|| format!("chat {id} does not exist"))?;
-            Ok(format!("# {}\n{}", c.title, lair.store.transcript(id)?))
-        }
-    }?;
-    Ok(shorten(out))
+impl Spec {
+    /// Whether these settings let it work, and if not, why.
+    pub fn ready(&self, config: &Config) -> Result<(), &'static str> {
+        (self.ready)(config)
+    }
+
+    /// Runs one call; the text is what the model reads back, already shortened.
+    pub async fn run(&self, c: &mut Ctx<'_>, args: &Value) -> Result<String> {
+        Ok(shorten((self.run)(c, args).await?))
+    }
+}
+
+fn list_skills(catalog: &Catalog) -> String {
+    let lines: Vec<String> = catalog
+        .list()
+        .iter()
+        .map(|s| {
+            let off = if s.enabled { "" } else { " (disabled)" };
+            format!("- {} ({}): {} [triggers: {}]{off}", s.id, s.name, s.description, s.when.join(", "))
+        })
+        .collect();
+    lines.join("\n")
+}
+
+fn save_skill(catalog: &mut Catalog, args: &Value) -> Result<String> {
+    let id = req(args, "id")?;
+    let when = args
+        .get("when")
+        .and_then(Value::as_array)
+        .map(|w| w.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let manifest = Manifest {
+        name: req(args, "name")?.to_owned(),
+        description: str_arg(args, "description").unwrap_or("").to_owned(),
+        when,
+        source: None,
+    };
+    catalog.save(id, &manifest, req(args, "prompt")?)?;
+    Ok(format!("skill {id} saved; it runs when the user's message has one of its triggers"))
 }
 
 fn list_dir(ws: &Path, path: &str) -> Result<String> {
@@ -319,7 +328,7 @@ async fn run_command(ws: &Path, command: &str) -> Result<String> {
     Ok(format!("[exit code {}]\n{}", out.status.code().unwrap_or(-1), text.trim_end()))
 }
 
-async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str, sources: &mut usize) -> Result<String> {
+async fn web_search(searxng: &str, http: &reqwest::Client, query: &str, sources: &mut usize) -> Result<String> {
     #[derive(Deserialize)]
     struct Results {
         results: Vec<Hit>,
@@ -331,9 +340,8 @@ async fn web_search(searxng: Option<&str>, http: &reqwest::Client, query: &str, 
         #[serde(default)]
         content: String,
     }
-    let base = searxng.context("web search is not set up: set SearXNG in the settings")?;
     let r: Results = http
-        .get(format!("{}/search", base.trim_end_matches('/')))
+        .get(format!("{}/search", searxng.trim_end_matches('/')))
         .query(&[("q", query), ("format", "json")])
         .send()
         .await?
@@ -424,6 +432,16 @@ mod tests {
     }
 
     #[test]
+    fn only_tools_the_settings_let_work_are_offered() {
+        let offered = |c: &Config| system_prompt(c).contains("- web_search:");
+        assert!(!offered(&Config::default()), "no SearXNG, no web search");
+        assert!(offered(&Config { searxng: Some("http://s".into()), ..Default::default() }));
+        let memory = |c: &Config| system_prompt(c).contains("- search_memory:");
+        assert!(memory(&Config::default()) && !memory(&Config { memory: Some(false), ..Default::default() }));
+        assert!(SPECS.iter().all(|s| spec(s.name).is_some_and(|f| std::ptr::eq(f, s))), "names are unique");
+    }
+
+    #[test]
     fn page_titles_are_read_and_unescaped() {
         assert_eq!(
             html_title(b"<html><HEAD><title lang=pt>\n Ol&aacute;  mundo </title>").as_deref(),
@@ -449,8 +467,8 @@ mod tests {
     #[test]
     fn long_output_is_cut_with_a_note() {
         let s = shorten("é".repeat(MAX_OUTPUT + 10));
-        assert!(s.ends_with(&format!("(cut: {} characters in total)", MAX_OUTPUT + 10)));
-        assert_eq!(s.chars().filter(|&c| c == 'é').count(), MAX_OUTPUT);
+        assert_eq!(s.chars().filter(|&c| c == 'é').count(), MAX_OUTPUT, "cut by characters, not bytes");
+        assert!(s.contains(&(MAX_OUTPUT + 10).to_string()), "the model learns how long it was: {s}");
         assert_eq!(shorten("curto".into()), "curto");
     }
 }

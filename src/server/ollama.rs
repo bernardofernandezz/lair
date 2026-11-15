@@ -18,9 +18,11 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use super::compat::{self, Opts, Out, Started, Stop, Texts, ToolDef, WireMsg, start, stops};
-use super::{AppState, now};
-use crate::engine::{Done, Finish, ModelEntry, Reasoning};
+use super::core::{self, Convo, Out, Reply, Request, Sampling, Started, Stop, Texts, Tool, stops};
+use super::{ApiError, AppState, Dialect, now};
+use crate::agent::Call;
+use crate::generation::{Done, Finish, Msg, Reasoning};
+use crate::models::ModelEntry;
 use crate::{download, hub};
 
 /// The Ollama API version lair answers to, not lair's own: some clients refuse versions they see as old.
@@ -41,7 +43,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 fn error(status: StatusCode, msg: impl ToString) -> Response {
-    (status, Json(json!({ "error": msg.to_string() }))).into_response()
+    Dialect::Ollama.error(status, msg.to_string())
 }
 
 /// Ollama reads JSON whatever the content type says, and its docs' `curl -d` examples rely on that.
@@ -152,31 +154,35 @@ struct Options {
 }
 
 impl Options {
-    /// `format` is Ollama's structured output: `"json"` for any object, or a JSON schema.
-    fn with(self, think: Option<Value>, format: Option<Value>) -> Opts {
-        Opts {
+    fn sampling(&self) -> Sampling {
+        Sampling {
             temperature: self.temperature,
             top_p: self.top_p,
             max_tokens: self.num_predict.and_then(|n| usize::try_from(n).ok()),
-            seed: self.seed.map(|n| n as u32),
-            reasoning: think.and_then(|t| match t {
-                Value::Bool(false) => Some(Reasoning::Off),
-                Value::Bool(true) => Some(Reasoning::Deep),
-                Value::String(s) if s == "low" => Some(Reasoning::Light),
-                Value::String(_) => Some(Reasoning::Deep),
-                _ => None,
-            }),
+            seed: self.seed.and_then(|n| u32::try_from(n).ok()),
             top_k: self.top_k,
             min_p: self.min_p,
             repeat_penalty: self.repeat_penalty,
-            stop: stops(self.stop),
-            schema: match format {
-                Some(Value::String(f)) if f == "json" => Some(json!({ "type": "object" })),
-                Some(schema @ Value::Object(_)) => Some(schema),
-                _ => None,
-            },
-            ..Default::default()
         }
+    }
+}
+
+/// `think`: `true`, `false`, or a level (`"low"`, `"medium"`, `"high"`).
+fn reasoning(think: Option<Value>) -> Option<Reasoning> {
+    match think? {
+        Value::Bool(false) => Some(Reasoning::Off),
+        Value::Bool(true) => Some(Reasoning::Deep),
+        Value::String(s) => Some(s.parse().unwrap_or(Reasoning::Deep)),
+        _ => None,
+    }
+}
+
+/// `format` is Ollama's structured output: `"json"` for any object, or a JSON schema.
+fn schema(format: Option<Value>) -> Option<Value> {
+    match format? {
+        Value::String(f) if f == "json" => Some(core::any_object()),
+        schema @ Value::Object(_) => Some(schema),
+        _ => None,
     }
 }
 
@@ -227,10 +233,10 @@ impl Keep {
 
 /// A request with nothing to generate is Ollama's way to load a model, or with `keep_alive: 0` to
 /// unload it.
-async fn preload(s: &AppState, model: Option<String>, keep: Option<Keep>, chat: bool) -> Response {
+async fn preload(s: &AppState, model: Option<String>, keep: Option<Keep>, shape: Shape) -> Response {
     let route = match s.lair.models.resolve(model.as_deref(), false) {
         Ok(route) => route,
-        Err(e) => return error(StatusCode::NOT_FOUND, e),
+        Err(e) => return core::unresolved(e).to(Dialect::Ollama),
     };
     let reason = if keep == Some(Keep::Unload) {
         s.lair.models.unload(&route.id);
@@ -244,17 +250,70 @@ async fn preload(s: &AppState, model: Option<String>, keep: Option<Keep>, chat: 
         }
         "load"
     };
-    let mut v = piece(&route.id, chat, "", "", &[]);
+    let mut v = piece(&route.id, shape, "", "", &[]);
     v["done"] = json!(true);
     v["done_reason"] = json!(reason);
     Json(v).into_response()
+}
+
+/// A message as Ollama clients send it.
+#[derive(Deserialize)]
+struct Message {
+    role: String,
+    /// Some clients send `null` on a turn that only calls tools.
+    #[serde(default)]
+    content: Option<String>,
+    /// Plain base64.
+    #[serde(default)]
+    images: Vec<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
+    /// The tool a `tool` message answers.
+    #[serde(alias = "name")]
+    tool_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ToolCall {
+    function: CallFn,
+}
+
+#[derive(Deserialize)]
+struct CallFn {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+#[derive(Deserialize)]
+struct ToolDef {
+    function: Tool,
+}
+
+fn convo(messages: Vec<Message>) -> Result<Convo, String> {
+    let mut c = Convo::default();
+    for m in messages {
+        let mut msg = Msg { role: m.role, content: m.content.unwrap_or_default(), ..Default::default() };
+        for b64 in &m.images {
+            msg.images.push(c.image(b64)?);
+        }
+        for call in m.tool_calls {
+            msg.content.push_str(&c.call(None, &call.function.name, call.function.arguments));
+        }
+        if msg.role == "tool" {
+            c.result(m.tool_name, None, msg);
+        } else {
+            c.push(msg);
+        }
+    }
+    Ok(c)
 }
 
 #[derive(Deserialize)]
 struct ChatReq {
     model: Option<String>,
     #[serde(default)]
-    messages: Vec<WireMsg>,
+    messages: Vec<Message>,
     #[serde(default)]
     tools: Vec<ToolDef>,
     stream: Option<bool>,
@@ -273,10 +332,23 @@ async fn chat(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
     };
     let keep = Keep::parse(&req.keep_alive);
     if req.messages.is_empty() {
-        return preload(&s, req.model, keep, true).await;
+        return preload(&s, req.model, keep, Shape::Chat).await;
     }
-    let started = start(&s, req.model, req.messages, &req.tools, req.options.with(req.think, req.format));
-    reply(s, started, req.stream.unwrap_or(true), true, keep).await
+    let convo = match convo(req.messages) {
+        Ok(c) => c,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    let request = Request {
+        model: req.model,
+        convo,
+        tools: req.tools.into_iter().map(|t| t.function).collect(),
+        sampling: req.options.sampling(),
+        reasoning: reasoning(req.think),
+        stop: stops(req.options.stop),
+        schema: schema(req.format),
+        ..Default::default()
+    };
+    reply(s, request, req.stream.unwrap_or(true), Shape::Chat, keep).await
 }
 
 #[derive(Deserialize)]
@@ -306,23 +378,44 @@ async fn generate(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
     };
     let keep = Keep::parse(&req.keep_alive);
     if req.prompt.is_empty() && req.images.is_empty() {
-        return preload(&s, req.model, keep, false).await;
+        return preload(&s, req.model, keep, Shape::Generate).await;
     }
-    let mut msgs = Vec::new();
+    let mut convo = Convo::default();
     if let Some(system) = req.system.filter(|_| !req.raw) {
-        msgs.push(json!({ "role": "system", "content": system }));
+        convo.push(Msg { role: "system".into(), content: system, ..Default::default() });
     }
-    msgs.push(json!({ "role": "user", "content": req.prompt, "images": req.images }));
-    let msgs = serde_json::from_value(Value::Array(msgs)).expect("messages built above are valid");
-    let opts = Opts { raw: req.raw, ..req.options.with(req.think, req.format) };
-    let started = start(&s, req.model, msgs, &[], opts);
-    reply(s, started, req.stream.unwrap_or(true), false, keep).await
+    let mut user = Msg { role: "user".into(), content: req.prompt, ..Default::default() };
+    for b64 in &req.images {
+        match convo.image(b64) {
+            Ok(path) => user.images.push(path),
+            Err(e) => return error(StatusCode::BAD_REQUEST, e),
+        }
+    }
+    convo.push(user);
+    let request = Request {
+        model: req.model,
+        convo,
+        sampling: req.options.sampling(),
+        reasoning: reasoning(req.think),
+        stop: stops(req.options.stop),
+        schema: schema(req.format),
+        raw: req.raw,
+        ..Default::default()
+    };
+    reply(s, request, req.stream.unwrap_or(true), Shape::Generate, keep).await
 }
 
-/// One response object. `chat` picks the `/api/chat` shape (`message`) over `/api/generate`'s (`response`).
-fn piece(model: &str, chat: bool, content: &str, thinking: &str, calls: &[Value]) -> Value {
+/// `/api/chat` answers with a `message`, `/api/generate` with a `response`.
+#[derive(Clone, Copy)]
+enum Shape {
+    Chat,
+    Generate,
+}
+
+/// One response object.
+fn piece(model: &str, shape: Shape, content: &str, thinking: &str, calls: &[Value]) -> Value {
     let mut v = json!({ "model": model, "created_at": rfc3339(now()), "done": false });
-    if chat {
+    if let Shape::Chat = shape {
         let mut message = json!({ "role": "assistant", "content": content });
         if !thinking.is_empty() {
             message["thinking"] = json!(thinking);
@@ -353,55 +446,47 @@ fn finish(mut v: Value, d: &Done) -> Value {
     v
 }
 
-fn call(c: &crate::agent::Call) -> Value {
+fn call(c: &Call) -> Value {
     json!({ "function": { "name": c.name, "arguments": c.arguments } })
 }
 
-async fn reply(
-    s: Arc<AppState>,
-    started: Result<Started, (StatusCode, String)>,
-    stream: bool,
-    chat: bool,
-    keep: Option<Keep>,
-) -> Response {
-    let Started { model, mut out, .. } = match started {
-        Ok(s) => s,
-        Err((status, message)) => return error(status, message),
+async fn reply(s: Arc<AppState>, request: Request, stream: bool, shape: Shape, keep: Option<Keep>) -> Response {
+    let Started { model, out, .. } = match core::start(&s.lair, request) {
+        Ok(started) => started,
+        Err(e) => return e.to(Dialect::Ollama),
     };
-    // The generation is over: now the keep-alive the request asked for takes effect.
+    // The generation is over, however it ended: now the keep-alive the request asked for takes effect.
     let settle = move |model: &str| {
         if let Some(keep) = keep {
             keep.apply(&s, model);
         }
     };
     if !stream {
-        let (mut content, mut thinking, mut calls) = (String::new(), String::new(), Vec::new());
-        loop {
-            match out.recv().await {
-                Some(Out::Thinking(t)) => thinking.push_str(&t),
-                Some(Out::Text(t)) => content.push_str(&t),
-                Some(Out::Call(c)) => calls.push(call(&c)),
-                Some(Out::Done(d)) => {
-                    settle(&model);
-                    return Json(finish(piece(&model, chat, &content, &thinking, &calls), &d)).into_response();
-                }
-                Some(Out::Failed(m)) => return error(StatusCode::BAD_REQUEST, m),
-                None => return error(StatusCode::INTERNAL_SERVER_ERROR, "generation ended unexpectedly"),
+        let reply = core::collect(out).await;
+        settle(&model);
+        return match reply {
+            Ok(Reply { thinking, text, calls, done }) => {
+                let calls: Vec<Value> = calls.iter().map(call).collect();
+                Json(finish(piece(&model, shape, &text, &thinking, &calls), &done)).into_response()
             }
-        }
+            Err(e) => e.to(Dialect::Ollama),
+        };
     }
-    let lines = UnboundedReceiverStream::new(out).map(move |o| {
+    let lines = core::frames(out, move |o| {
         let v = match o {
-            Out::Thinking(t) => piece(&model, chat, "", &t, &[]),
-            Out::Text(t) => piece(&model, chat, &t, "", &[]),
-            Out::Call(c) => piece(&model, chat, "", "", &[call(&c)]),
+            Out::Thinking(t) => piece(&model, shape, "", &t, &[]),
+            Out::Text(t) => piece(&model, shape, &t, "", &[]),
+            Out::Call(c) => piece(&model, shape, "", "", &[call(&c)]),
             Out::Done(d) => {
                 settle(&model);
-                finish(piece(&model, chat, "", "", &[]), &d)
+                finish(piece(&model, shape, "", "", &[]), &d)
             }
-            Out::Failed(m) => json!({ "error": m }),
+            Out::Failed(m) => {
+                settle(&model);
+                json!({ "error": m })
+            }
         };
-        Ok::<_, Infallible>(format!("{v}\n"))
+        vec![Ok::<_, Infallible>(format!("{v}\n"))]
     });
     ndjson(lines)
 }
@@ -418,25 +503,25 @@ struct EmbedReq {
     input: Texts,
 }
 
-async fn embed_request(s: &AppState, body: &[u8]) -> Result<(String, Vec<Vec<f32>>, usize), (StatusCode, String)> {
-    let req: EmbedReq = parse(body).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    compat::embed(s, req.model, req.input.into_vec()).await
+async fn embed_request(s: &AppState, body: &[u8]) -> Result<core::Embedded, ApiError> {
+    let req: EmbedReq = parse(body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    core::embed(&s.lair, req.model, req.input.into()).await
 }
 
 async fn embed(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
     match embed_request(&s, &body).await {
-        Ok((model, embeddings, read)) => {
-            Json(json!({ "model": model, "embeddings": embeddings, "prompt_eval_count": read })).into_response()
+        Ok(e) => {
+            Json(json!({ "model": e.model, "embeddings": e.vectors, "prompt_eval_count": e.tokens })).into_response()
         }
-        Err((status, message)) => error(status, message),
+        Err(e) => e.to(Dialect::Ollama),
     }
 }
 
 /// The older endpoint: one text in, one vector out.
 async fn embeddings(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
     match embed_request(&s, &body).await {
-        Ok((_, mut vectors, _)) => Json(json!({ "embedding": vectors.swap_remove(0) })).into_response(),
-        Err((status, message)) => error(status, message),
+        Ok(mut e) => Json(json!({ "embedding": e.vectors.swap_remove(0) })).into_response(),
+        Err(e) => e.to(Dialect::Ollama),
     }
 }
 
@@ -445,12 +530,10 @@ async fn remove(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
         Ok(r) => r,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    match super::native::delete_model(&s.lair, &req.model).await {
-        Ok(_) => Json(json!({})).into_response(),
-        Err(e) => {
-            let (status, message) = e.parts();
-            error(status, message)
-        }
+    match s.lair.models.delete(&req.model).await {
+        Ok(Some(_)) => Json(json!({})).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, format!("model {} not found", req.model)),
+        Err(e) => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
     }
 }
 
@@ -460,20 +543,9 @@ async fn remove(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
 /// who names a repo that way choose what gets downloaded. URLs are refused: the server downloads from
 /// Hugging Face only.
 fn pull_spec(name: &str) -> Result<(String, Option<String>), String> {
-    let name = name.trim();
-    if let Some(repo) = hub::ollama_repo(name) {
-        return Ok((repo.to_owned(), None));
-    }
-    let name = ["https://huggingface.co/", "huggingface.co/", "hf.co/"]
-        .iter()
-        .find_map(|p| name.strip_prefix(p))
-        .unwrap_or(name);
-    let (repo, quant) = match name.split_once(':') {
-        Some((repo, quant)) => (repo, Some(quant.to_owned()).filter(|q| !q.is_empty() && q != "latest")),
-        None => (name, None),
-    };
-    match hub::check_repo(repo) {
-        Ok(()) => Ok((repo.to_owned(), quant)),
+    let hub::Wanted { name, quant } = hub::wanted(name);
+    match hub::check_repo(&name) {
+        Ok(()) => Ok((name, quant)),
         Err(_) => Err(format!(
             "\"{name}\" is not a Hugging Face repo or a known Ollama name; lair pulls GGUF repos by owner/name, e.g. Qwen/Qwen3-4B-GGUF"
         )),
@@ -502,8 +574,7 @@ async fn pull(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("{e:#}")),
     };
     // Already downloading is fine: this request then follows the download that is running.
-    let running = s.lair.downloads.get(&repo, &file).is_some_and(|p| !p.finished && p.error.is_none());
-    if !running && let Err(e) = download::start(s.lair.clone(), repo.clone(), file.clone()).await {
+    if let Err(e) = download::start(s.lair.clone(), repo.clone(), file.clone()).await {
         return error(StatusCode::BAD_REQUEST, format!("{e:#}"));
     }
     let (tx, rx) = mpsc::unbounded_channel();
@@ -573,16 +644,36 @@ mod tests {
     }
 
     #[test]
-    fn think_maps_to_reasoning() {
-        let r = |t: Value| Options::default().with(Some(t), None).reasoning;
+    fn options_are_read_as_ollama_clients_send_them() {
+        let r = |t: Value| reasoning(Some(t));
         assert_eq!(r(json!(false)), Some(Reasoning::Off));
         assert_eq!(r(json!(true)), Some(Reasoning::Deep));
         assert_eq!(r(json!("low")), Some(Reasoning::Light));
-        assert_eq!(Options { num_predict: Some(-1), ..Default::default() }.with(None, None).max_tokens, None);
-        let format = |f: Value| Options::default().with(None, Some(f)).schema;
-        assert_eq!(format(json!("json")), Some(json!({ "type": "object" })));
-        assert_eq!(format(json!({ "type": "array" })), Some(json!({ "type": "array" })));
-        assert_eq!(format(json!("yaml")), None);
+        assert_eq!(r(json!("medium")), Some(Reasoning::Deep));
+        assert_eq!(Options { num_predict: Some(-1), ..Default::default() }.sampling().max_tokens, None);
+        assert_eq!(Options { seed: Some(-1), ..Default::default() }.sampling().seed, None, "not a wrapped-around seed");
+        assert_eq!(schema(Some(json!("json"))), Some(core::any_object()));
+        assert_eq!(schema(Some(json!({ "type": "array" }))), Some(json!({ "type": "array" })));
+        assert_eq!(schema(Some(json!("yaml"))), None);
+    }
+
+    #[test]
+    fn ollama_messages_become_the_shared_conversation() {
+        let msgs: Vec<Message> = serde_json::from_value(json!([
+            { "role": "user", "content": "weather?", "images": ["aGk="] },
+            { "role": "assistant", "content": null, "tool_calls": [
+                { "function": { "name": "weather", "arguments": "{\"city\":\"Rio\"}" } }
+            ] },
+            { "role": "tool", "name": "weather", "content": "31C" }
+        ]))
+        .unwrap();
+        let mut want = Convo::default();
+        let call = want.call(None, "weather", json!({ "city": "Rio" }));
+        want.result(Some("weather".into()), None, Msg { content: "31C".into(), ..Default::default() });
+        let (got, want) = (convo(msgs).unwrap().into_msgs(), want.into_msgs());
+        assert_eq!(got[0].images.len(), 1);
+        assert_eq!(got[1].content, call, "null content, arguments as JSON text");
+        assert_eq!(got[2].content, want[0].content);
     }
 
     #[test]
@@ -609,6 +700,10 @@ mod tests {
         for bad in ["llama3", "llama3:8b", "https://evil.example/m.gguf", "http://10.0.0.1/a/b", "../x/y", ""] {
             assert!(pull_spec(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn parameter_counts_read_as_ollama_shows_them() {
         assert_eq!(
             (parameter_size(4_022_000_000), parameter_size(494_000_000), parameter_size(0)),
             ("4.0B".into(), "494M".into(), String::new())

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{Msg, with_system};
+use crate::generation::{Msg, with_system};
 use crate::store::Named;
 
 const BUILTINS: &[(&str, &str, &str)] =
@@ -62,17 +62,23 @@ pub struct Manifest {
     pub source: Option<String>,
 }
 
-#[derive(Default)]
 pub struct Catalog {
     skills: Vec<Skill>,
+    /// The 3D assets a skill's `{{assets}}` lists.
+    assets: Vec<String>,
     extra: Option<PathBuf>,
     /// Writable folder; `None` when skills are turned off.
     own: Option<PathBuf>,
 }
 
 impl Catalog {
-    pub fn load(extra: Option<PathBuf>, own: PathBuf) -> Self {
-        let mut c = Self { skills: Vec::new(), extra, own: Some(own) };
+    /// No skills at all, and none can be added (`--no-skills`).
+    pub fn off() -> Self {
+        Self { skills: Vec::new(), assets: Vec::new(), extra: None, own: None }
+    }
+
+    pub fn load(extra: Option<PathBuf>, own: PathBuf, assets: Vec<String>) -> Self {
+        let mut c = Self { skills: Vec::new(), assets, extra, own: Some(own) };
         c.reload();
         c
     }
@@ -106,11 +112,11 @@ impl Catalog {
     }
 
     /// The skill the last user message asks for, if any, and the messages with its instructions added.
-    pub fn apply(&self, msgs: &[Msg], assets: &[String]) -> (Option<Named>, Vec<Msg>) {
+    pub fn apply(&self, msgs: &[Msg]) -> (Option<Named>, Vec<Msg>) {
         let Some(skill) = self.trigger(msgs) else {
             return (None, msgs.to_vec());
         };
-        let prompt = skill.prompt.replace("{{assets}}", &assets_section(assets));
+        let prompt = skill.prompt.replace("{{assets}}", &assets_section(&self.assets));
         (Some(Named { id: skill.id.clone(), name: skill.name.clone() }), with_system(msgs, prompt.trim_end()))
     }
 
@@ -217,9 +223,8 @@ pub fn slug(name: &str) -> String {
 
 fn valid_id(id: &str) -> bool {
     let mut chars = id.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && id.len() <= 64
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    let plain = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    chars.next().is_some_and(plain) && id.len() <= 64 && chars.all(|c| plain(c) || c == '-' || c == '_')
 }
 
 fn load_dir(dir: &Path, origin: Origin) -> Vec<Skill> {
@@ -307,7 +312,7 @@ mod tests {
     }
 
     fn triggered(c: &Catalog, text: &str) -> Option<String> {
-        c.apply(&user(text), &[]).0.map(|s| s.id)
+        c.apply(&user(text)).0.map(|s| s.id)
     }
 
     fn manifest(name: &str, when: &[&str]) -> Manifest {
@@ -316,7 +321,7 @@ mod tests {
 
     #[test]
     fn the_3d_skill_triggers_only_on_explicit_requests() {
-        let c = Catalog::load(None, temp("3d"));
+        let c = Catalog::load(None, temp("3d"), vec![]);
         assert_eq!(triggered(&c, "mostre um sistema solar em 3D").as_deref(), Some("3d"));
         assert_eq!(triggered(&c, "Desenhe uma molécula em três dimensões").as_deref(), Some("3d"));
         assert_eq!(triggered(&c, "qual o maior planeta?"), None);
@@ -326,17 +331,17 @@ mod tests {
 
     #[test]
     fn apply_adds_the_prompt_with_the_asset_list() {
-        let c = Catalog::load(None, temp("apply"));
+        let c = Catalog::load(None, temp("apply"), vec!["robot.glb".into()]);
         let msgs = vec![
             Msg { role: "system".into(), content: "base".into(), ..Default::default() },
             Msg { role: "user".into(), content: "uma cena 3d".into(), ..Default::default() },
         ];
-        let (_, out) = c.apply(&msgs, &["robot.glb".into()]);
+        let (_, out) = c.apply(&msgs);
         assert_eq!(out.len(), 2);
         assert!(out[0].content.starts_with("base\n\n"));
         assert!(out[0].content.contains("- robot.glb"));
         assert!(!out[0].content.contains("{{assets}}"));
-        let (skill, out) = c.apply(&user("oi"), &[]);
+        let (skill, out) = c.apply(&user("oi"));
         assert!(skill.is_none());
         assert_eq!(out.len(), 1);
     }
@@ -344,20 +349,20 @@ mod tests {
     #[test]
     fn created_skills_replace_builtins_until_deleted_and_can_be_switched_off() {
         let own = temp("own");
-        let mut c = Catalog::load(None, own.clone());
+        let mut c = Catalog::load(None, own.clone(), vec![]);
         let pirate = c.save("pirate", &manifest("Pirata", &["pirata"]), "Responda como um pirata.").unwrap();
         assert_eq!(pirate.origin, Origin::Created);
         assert_eq!(triggered(&c, "fale como um pirata").as_deref(), Some("pirate"));
 
         c.save("3d", &manifest("3D custom", &["cena"]), "Custom.").unwrap();
-        assert_eq!(c.apply(&user("uma cena"), &[]).0.map(|s| s.name).as_deref(), Some("3D custom"));
+        assert_eq!(c.apply(&user("uma cena")).0.map(|s| s.name).as_deref(), Some("3D custom"));
         c.remove("3d").unwrap();
         assert_eq!(c.list().iter().find(|s| s.id == "3d").unwrap().origin, Origin::Builtin);
         assert!(c.remove("3d").is_err(), "built-ins cannot be deleted");
 
         c.set_enabled("pirate", false).unwrap();
         assert_eq!(triggered(&c, "fale como um pirata"), None);
-        let reopened = Catalog::load(None, own);
+        let reopened = Catalog::load(None, own, vec![]);
         assert!(!reopened.list().iter().find(|s| s.id == "pirate").unwrap().enabled, "the switch survives a restart");
     }
 
@@ -372,13 +377,14 @@ mod tests {
     #[test]
     fn bad_skills_are_refused_or_skipped() {
         let own = temp("bad");
-        let mut c = Catalog::load(None, own.clone());
+        let mut c = Catalog::load(None, own.clone(), vec![]);
         assert!(c.save("Bad Id", &manifest("x", &["x"]), "x").is_err());
+        assert!(c.save("Pirate", &manifest("x", &["x"]), "x").is_err(), "folders load lowercased, so ids are too");
         assert!(c.save("silent", &manifest("Sem gatilho", &[]), "x").is_err());
         std::fs::create_dir_all(own.join("broken")).unwrap();
         std::fs::write(own.join("broken/skill.json"), "{not json").unwrap();
         std::fs::write(own.join("broken/prompt.md"), "x").unwrap();
-        assert!(Catalog::load(None, own).list().iter().all(|s| s.id != "broken"));
-        assert!(Catalog::default().save("a", &manifest("A", &["a"]), "x").is_err(), "--no-skills");
+        assert!(Catalog::load(None, own, vec![]).list().iter().all(|s| s.id != "broken"));
+        assert!(Catalog::off().save("a", &manifest("A", &["a"]), "x").is_err(), "--no-skills");
     }
 }

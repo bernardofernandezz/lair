@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use super::{ApiResult, AppState, bad, missing, settings, sse};
+use super::{ApiResult, AppState, bad, missing, settings};
 use crate::agent::Decision;
 use crate::attach;
-use crate::engine::{Msg, Params};
+use crate::generation::{Msg, Params};
 use crate::peers::NodeInfo;
 use crate::skills::{Manifest, Skill, install, slug};
 use crate::store::{Conversation, Hit, Settings};
@@ -27,6 +27,12 @@ use crate::turn;
 use crate::{download, hub, memory as mem};
 
 type S = State<Arc<AppState>>;
+
+/// One stream item as a server-sent event; see [`crate::sse`].
+fn sse(item: &impl Serialize) -> axum::response::sse::Event {
+    let (name, data) = crate::sse::frame(item);
+    axum::response::sse::Event::default().event(name).data(data)
+}
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -120,14 +126,22 @@ struct SkillDraft {
     prompt: String,
 }
 
+impl SkillDraft {
+    /// Skills written here have no source to update from.
+    fn save(self, s: &AppState, id: &str) -> ApiResult<Json<Skill>> {
+        let manifest = Manifest { source: None, ..self.manifest };
+        Ok(Json(s.lair.skills.write().unwrap().save(id, &manifest, &self.prompt).map_err(bad)?))
+    }
+}
+
 /// A new skill, named after its name.
 async fn create_skill(State(s): S, Json(d): Json<SkillDraft>) -> ApiResult<Json<Skill>> {
-    save_skill(State(s), Path(slug(&d.manifest.name)), Json(d)).await
+    let id = slug(&d.manifest.name);
+    d.save(&s, &id)
 }
 
 async fn save_skill(State(s): S, Path(id): Path<String>, Json(d): Json<SkillDraft>) -> ApiResult<Json<Skill>> {
-    let manifest = Manifest { source: None, ..d.manifest };
-    Ok(Json(s.lair.skills.write().unwrap().save(&id, &manifest, &d.prompt).map_err(bad)?))
+    d.save(&s, &id)
 }
 
 #[derive(Deserialize)]
@@ -211,9 +225,7 @@ async fn skills_index(State(s): S) -> ApiResult<Json<Value>> {
     let Some(url) = s.lair.config().skills_index else {
         return Ok(Json(json!({ "configured": false, "skills": [] })));
     };
-    let entries = install::index(&s.lair.http, &url)
-        .await
-        .map_err(|e| super::ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let entries = install::index(&s.lair.http, &url).await.map_err(bad_gateway)?;
     let catalog = s.lair.skills.read().unwrap();
     let installed = |url: &str| catalog.list().iter().any(|k| k.source.as_deref() == Some(url));
     let skills: Vec<_> = entries.iter().map(|e| json!({ "entry": e, "installed": installed(&e.url) })).collect();
@@ -311,20 +323,12 @@ async fn models(State(s): S) -> Json<Value> {
     Json(json!({ "models": s.lair.models.local(), "loaded": s.lair.models.ps() }))
 }
 
-/// Deletes an installed model's files. Shared with the Ollama-style API. Only models in lair's own
+/// Deletes an installed model's files. Only models in lair's own
 /// folder: the path comes from the catalog, never from the request.
-pub async fn delete_model(lair: &crate::lair::Lair, id: &str) -> ApiResult<u64> {
-    let path = lair.models.path(id).ok_or_else(|| missing(format!("model {id} not found")))?;
-    let dir = lair.models.dir().ok_or_else(|| bad(anyhow::anyhow!("no models folder to delete from")))?.to_owned();
-    // Out of memory first: Windows refuses to delete a file that is mapped.
-    lair.models.unload(id);
-    let freed = tokio::task::spawn_blocking(move || download::remove(&dir, &path)).await?.map_err(bad)?;
-    lair.models.refresh().await;
-    Ok(freed)
-}
-
 async fn remove_model(State(s): S, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({ "freed": delete_model(&s.lair, &id).await? })))
+    let freed =
+        s.lair.models.delete(&id).await.map_err(bad)?.ok_or_else(|| missing(format!("model {id} not found")))?;
+    Ok(Json(json!({ "freed": freed })))
 }
 
 async fn load_model(State(s): S, Path(id): Path<String>) -> ApiResult<StatusCode> {
@@ -354,14 +358,12 @@ async fn memory(State(s): S) -> ApiResult<Json<Value>> {
 
 /// Forgets everything; chats and files are indexed again from scratch (unless memory is off).
 async fn forget(State(s): S) -> ApiResult<StatusCode> {
-    s.lair.store.clear_chunks()?;
-    s.lair.store.save_kv("memory.chat", &json!(0))?;
-    s.lair.memory.wake();
+    mem::forget(&s.lair)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn memory_search(State(s): S, Query(q): Query<SearchQuery>) -> ApiResult<Json<Vec<mem::Hit>>> {
-    Ok(Json(mem::recall(&s.lair, &q.q, None, 10).await?))
+    Ok(Json(mem::recall(&s.lair, &q.q, None, 10).await.map_err(bad)?))
 }
 
 /// Hugging Face failed or answered something unexpected: not the client's fault.

@@ -2,10 +2,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, OriginalUri, Path, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response, sse as axum_sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_embed::RustEmbed;
@@ -19,9 +19,10 @@ use crate::lair::Lair;
 struct AssetsUi;
 
 mod anthropic;
-mod compat;
+mod core;
 mod native;
 mod ollama;
+mod openai;
 mod settings;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -45,11 +46,11 @@ pub struct AppState {
 fn router(state: Arc<AppState>) -> Router {
     let auth = middleware::from_fn_with_state(state.clone(), require_token);
     let v1 = Router::new()
-        .route("/models", get(compat::models))
-        .route("/models/{id}", get(compat::model))
-        .route("/chat/completions", post(compat::chat_completions))
-        .route("/completions", post(compat::completions))
-        .route("/embeddings", post(compat::embeddings))
+        .route("/models", get(openai::models))
+        .route("/models/{id}", get(openai::model))
+        .route("/chat/completions", post(openai::chat_completions))
+        .route("/completions", post(openai::completions))
+        .route("/embeddings", post(openai::embeddings))
         .route("/messages", post(anthropic::messages))
         .route("/messages/count_tokens", post(anthropic::count_tokens))
         .route("/assets/{*id}", get(asset_file))
@@ -62,15 +63,9 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new().nest("/v1", v1).nest("/api", ollama).nest("/lair/v1", native).fallback(web_ui).with_state(state)
 }
 
-/// Saves the speeds measured since the last save, on top of what is stored: `lair bench` may have
-/// added its own in the meantime.
 fn save_bench(lair: &Lair) {
-    let Some(measured) = lair.models.unsaved_bench() else { return };
-    let stored = lair.store.kv("bench").ok().flatten().and_then(|v| serde_json::from_value(v).ok());
-    let mut all: crate::speed::Bench = stored.unwrap_or_default();
-    all.samples.extend(measured.samples);
-    if let Err(e) =
-        serde_json::to_value(&all).map_err(anyhow::Error::from).and_then(|v| lair.store.save_kv("bench", &v))
+    if let Some(measured) = lair.models.unsaved_bench()
+        && let Err(e) = measured.save(&lair.store)
     {
         eprintln!("saving the measured speeds failed: {e:#}");
     }
@@ -158,7 +153,9 @@ async fn require_token(
             || constant_time_eq(cookie.as_bytes(), want.as_bytes())
             || (s.lair.config().trust_tailnet() && s.lair.peers.trusts(from.ip()).await);
         if !ok {
-            return error(StatusCode::UNAUTHORIZED, "invalid or missing token");
+            // Nested routers see their own part of the path; the dialect is in the whole of it.
+            let path = req.extensions().get::<OriginalUri>().map_or(req.uri().path(), |u| u.path());
+            return Dialect::of(path).error(StatusCode::UNAUTHORIZED, "invalid or missing token".into());
         }
     }
     next.run(req).await
@@ -251,18 +248,50 @@ async fn create_session(State(s): State<Arc<AppState>>) -> Response {
     }
 }
 
-async fn no_route() -> Response {
-    error(StatusCode::NOT_FOUND, "no such API route")
+async fn no_route(OriginalUri(uri): OriginalUri) -> Response {
+    Dialect::of(uri.path()).error(StatusCode::NOT_FOUND, "no such API route".into())
 }
 
-/// One stream item as a server-sent event; see [`crate::sse`].
-fn sse(item: &impl serde::Serialize) -> axum_sse::Event {
-    let (name, data) = crate::sse::frame(item);
-    axum_sse::Event::default().event(name).data(data)
+/// The API a route belongs to, which decides how its errors are worded: clients of each read only their own.
+#[derive(Clone, Copy)]
+enum Dialect {
+    /// `/v1` and lair's own API.
+    OpenAi,
+    Ollama,
+    Anthropic,
+}
+
+impl Dialect {
+    fn of(path: &str) -> Self {
+        if path.starts_with("/api/") {
+            Self::Ollama
+        } else if path == "/v1/messages" || path.starts_with("/v1/messages/") {
+            Self::Anthropic
+        } else {
+            Self::OpenAi
+        }
+    }
+
+    fn error(self, status: StatusCode, message: String) -> Response {
+        let body = match self {
+            Self::OpenAi => json!({ "error": { "message": message } }),
+            Self::Ollama => json!({ "error": message }),
+            Self::Anthropic => {
+                let kind = match status {
+                    StatusCode::NOT_FOUND => "not_found_error",
+                    StatusCode::BAD_REQUEST => "invalid_request_error",
+                    StatusCode::UNAUTHORIZED => "authentication_error",
+                    _ => "api_error",
+                };
+                json!({ "type": "error", "error": { "type": kind, "message": message } })
+            }
+        };
+        (status, Json(body)).into_response()
+    }
 }
 
 fn error(status: StatusCode, msg: impl ToString) -> Response {
-    (status, Json(json!({ "error": { "message": msg.to_string() } }))).into_response()
+    Dialect::OpenAi.error(status, msg.to_string())
 }
 
 /// A failed API call. Any error becomes a 500; [`bad`] and [`missing`] say whose fault it was.
@@ -277,15 +306,15 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 }
 
 impl ApiError {
-    /// The status and message, for an API that words its errors differently.
-    fn parts(self) -> (StatusCode, String) {
-        (self.0, self.1)
+    /// The error worded the way `d`'s clients read errors.
+    fn to(self, d: Dialect) -> Response {
+        d.error(self.0, self.1)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        error(self.0, self.1)
+        self.to(Dialect::OpenAi)
     }
 }
 

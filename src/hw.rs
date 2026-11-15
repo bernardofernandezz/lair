@@ -144,7 +144,7 @@ fn ram() -> (u64, u64) {
     if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 { (status.total_phys, status.avail_phys) } else { (0, 0) }
 }
 
-// ponytail: the env var names the CPU family, not its marketing name; read the registry's
+// shortcut: the env var names the CPU family, not its marketing name; read the registry's
 // ProcessorNameString if people want "Ryzen 7 7800X3D" here.
 #[cfg(windows)]
 fn cpu() -> String {
@@ -170,7 +170,7 @@ fn sysctl(name: &std::ffi::CStr, buf: &mut [u8]) -> usize {
     if ok { len.min(buf.len()) } else { 0 }
 }
 
-// ponytail: free RAM is unknown on macOS; Metal reports unified memory as the GPU's, which is what fit uses.
+// shortcut: free RAM is unknown on macOS; Metal reports unified memory as the GPU's, which is what fit uses.
 #[cfg(target_os = "macos")]
 fn ram() -> (u64, u64) {
     let mut total = [0u8; 8];

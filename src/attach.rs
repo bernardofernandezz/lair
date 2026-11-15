@@ -2,7 +2,6 @@
 //! the agent can open the original with `read_file`. A document's text goes into the prompt; an
 //! image goes to a vision model as pixels.
 
-use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -28,7 +27,6 @@ pub const TYPES: Types = Types {
     images: &["png", "jpg", "jpeg", "webp", "gif", "bmp"],
 };
 
-/// The largest upload accepted.
 pub const MAX_UPLOAD: usize = 16 * 1024 * 1024;
 /// How much of a document's text enters the prompt; the rest is for the agent's `read_file`.
 const INLINE_CHARS: usize = 16_000;
@@ -51,6 +49,19 @@ fn ext(name: &str) -> String {
 
 fn is_image(name: &str) -> bool {
     TYPES.images.contains(&ext(name).as_str())
+}
+
+/// A file whose text the model can read.
+pub fn is_document(name: &str) -> bool {
+    TYPES.documents.contains(&ext(name).as_str())
+}
+
+/// A document's text: extracted from a PDF, else the file read as UTF-8.
+pub fn read_text(path: &Path) -> Result<String> {
+    if ext(&path.to_string_lossy()) == "pdf" {
+        return pdf_extract::extract_text_from_mem(&std::fs::read(path)?).context("extracting text from the pdf");
+    }
+    std::fs::read_to_string(path).context("not a text file")
 }
 
 fn accepted(name: &str) -> bool {
@@ -88,11 +99,8 @@ pub fn load(workspace: &Path, id: &str, name: &str) -> Result<Loaded> {
     let image = is_image(id);
     let content = if image {
         Content::Image(file)
-    } else if ext(id) == "pdf" {
-        let data = std::fs::read(&file)?;
-        Content::Text(pdf_extract::extract_text_from_mem(&data).context("extracting text from the pdf")?)
     } else {
-        Content::Text(std::fs::read_to_string(&file).with_context(|| format!("{name} is not a text file"))?)
+        Content::Text(read_text(&file).with_context(|| format!("reading {name}"))?)
     };
     let chars = match &content {
         Content::Text(t) => t.chars().count(),
@@ -113,8 +121,7 @@ fn new_id(raw: &str) -> String {
     }
     let dot = name.rfind('.').unwrap_or(name.len());
     let (stem, extension) = name.split_at(dot);
-    let random = std::collections::hash_map::RandomState::new().hash_one(std::time::SystemTime::now());
-    format!("{:08x}-{}{extension}", random as u32, stem.chars().take(48).collect::<String>())
+    format!("{}-{}{extension}", &crate::util::random_id()[..8], stem.chars().take(48).collect::<String>())
 }
 
 /// Attribute values inside the block below; a quote in a file name must not end the attribute.
@@ -122,8 +129,9 @@ fn attr(s: &str) -> String {
     s.replace('\\', "/").replace('"', "''")
 }
 
-/// The documents' text, put before the user's question; the agent learns where each original lives.
-pub fn sections(docs: &[(&Attachment, &str)]) -> String {
+/// The documents' text, put before the user's question, each with where its original lives. In agent
+/// mode the model is told it can open them.
+pub fn sections(docs: &[(&Attachment, &str)], agent: bool) -> String {
     let mut out = String::new();
     for (a, text) in docs {
         let (name, path) = (attr(&a.name), attr(&format!("{DIR}/{}", a.id)));
@@ -137,9 +145,11 @@ pub fn sections(docs: &[(&Attachment, &str)]) -> String {
             ));
         }
     }
-    out.push_str(
-        "Attached document(s): use them to answer. The agent can also open the original files in the workspace.\n\n",
-    );
+    out.push_str("Attached document(s): use them to answer.");
+    if agent {
+        out.push_str(" You can also open the original files in the workspace.");
+    }
+    out.push_str("\n\n");
     out
 }
 
@@ -187,7 +197,7 @@ mod tests {
     fn sections_name_each_file_and_survive_odd_names() {
         let a = Attachment { id: "1-vazio.pdf".into(), name: "vazio.pdf".into(), chars: 0, image: false };
         let b = Attachment { id: "2-n.md".into(), name: "stra\"nge.md".into(), chars: 11, image: false };
-        let s = sections(&[(&a, "   "), (&b, "duas coisas")]);
+        let s = sections(&[(&a, "   "), (&b, "duas coisas")], false);
         assert!(s.contains("text=\"empty\""), "an empty document is still announced");
         assert!(s.contains("path=\"anexos/2-n.md\"") && s.contains("duas coisas"));
         assert!(s.contains("stra''nge"), "{s}");

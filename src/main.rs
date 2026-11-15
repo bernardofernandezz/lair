@@ -1,10 +1,13 @@
 mod agent;
 mod assets;
 mod attach;
+mod bench;
 mod chat;
 mod config;
 mod download;
 mod engine;
+mod generation;
+mod gguf;
 mod hub;
 mod hw;
 mod jail;
@@ -12,6 +15,7 @@ mod lair;
 mod memory;
 mod models;
 mod net;
+mod ollama_store;
 mod peers;
 mod server;
 mod skills;
@@ -20,20 +24,21 @@ mod sse;
 mod store;
 mod turn;
 mod update;
+mod util;
 
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
-use agent::Approvals;
-use anyhow::Context;
 use assets::Assets;
 use config::Config;
-use engine::{Engine, Msg, Params, Reasoning, Tune};
-use lair::Lair;
-use models::Models;
+use download::cli;
+use engine::{Engine, Tune};
+use generation::{Params, Reasoning};
+use lair::{Lair, Parts};
 use peers::Peers;
 use skills::Catalog;
 use store::Store;
@@ -44,6 +49,13 @@ use store::Store;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// Where models, conversations, skills and measurements are kept (default: ~/.local/share/lair, or
+    /// %LOCALAPPDATA%\lair on Windows)
+    #[arg(long, env = "LAIR_DATA", global = true)]
+    data: Option<PathBuf>,
+    /// Hugging Face token, for gated or private models
+    #[arg(long, env = "HF_TOKEN", hide_env_values = true, global = true)]
+    hf_token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -65,21 +77,16 @@ enum Cmd {
     Pull {
         /// `owner/repo`, `owner/repo:QUANT`, a repo name to search for, or the URL of a .gguf file
         model: String,
-        /// Folder to save it in (default: ~/.local/share/lair/models, or %LOCALAPPDATA%\lair\models on Windows)
-        #[arg(short = 'm', long = "models")]
-        models: Option<PathBuf>,
-        /// Hugging Face token, for gated or private repos
-        #[arg(long, env = "HF_TOKEN", hide_env_values = true)]
-        hf_token: Option<String>,
+        #[command(flatten)]
+        dir: ModelsDir,
     },
     /// Delete a model from the models folder
     #[command(visible_alias = "remove")]
     Rm {
         /// The model's name as `lair list` shows it, or any part of it that matches only one
         name: String,
-        /// Folder to delete from (default: ~/.local/share/lair/models, or %LOCALAPPDATA%\lair\models on Windows)
-        #[arg(short = 'm', long = "models")]
-        models: Option<PathBuf>,
+        #[command(flatten)]
+        dir: ModelsDir,
     },
     /// Measure how fast a model runs on this machine; lair uses it to estimate the speed of others
     Bench {
@@ -87,15 +94,11 @@ enum Cmd {
         name: Option<String>,
         #[command(flatten)]
         model: ModelArgs,
-        /// Where the measurement is kept (default: ~/.local/share/lair, or %LOCALAPPDATA%\lair on Windows)
-        #[arg(long, env = "LAIR_DATA")]
-        data: Option<PathBuf>,
     },
     /// List the models in the models folder
     List {
-        /// Folder to look in (default: ~/.local/share/lair/models, or %LOCALAPPDATA%\lair\models on Windows)
-        #[arg(short = 'm', long = "models")]
-        models: Option<PathBuf>,
+        #[command(flatten)]
+        dir: ModelsDir,
     },
     /// Web UI and HTTP API (OpenAI-style under /v1, Ollama-style under /api).
     /// The UI is embedded at build time: run `bun install && bun run build` in web/ before `cargo build --release`.
@@ -111,28 +114,37 @@ enum Cmd {
         /// Require `Authorization: Bearer <token>` on the API
         #[arg(long, env = "LAIR_TOKEN")]
         token: Option<String>,
-        /// Where conversations and installed skills are kept (default: ~/.local/share/lair, or
-        /// %LOCALAPPDATA%\lair on Windows)
-        #[arg(long, env = "LAIR_DATA")]
-        data: Option<PathBuf>,
         /// Folder the agent's file and shell tools work in (default: <data>/workspace)
         #[arg(long, env = "LAIR_WORKSPACE")]
         workspace: Option<PathBuf>,
         /// Base URL of a SearXNG instance for the agent's web search, e.g. http://localhost:8888
         #[arg(long, env = "LAIR_SEARXNG")]
         searxng: Option<String>,
-        /// Hugging Face token, for downloading gated or private models
-        #[arg(long, env = "HF_TOKEN", hide_env_values = true)]
-        hf_token: Option<String>,
         /// Tool steps the agent may take in one reply (default: 20)
-        #[arg(long, env = "LAIR_MAX_STEPS", value_parser = clap::value_parser!(u16).range(1..=200))]
-        max_steps: Option<u16>,
+        #[arg(long, env = "LAIR_MAX_STEPS")]
+        max_steps: Option<usize>,
         #[command(flatten)]
         network: NetworkArgs,
     },
     /// Update lair to the latest release
     #[command(visible_alias = "self-update")]
     Update,
+}
+
+#[derive(Args)]
+struct ModelsDir {
+    /// The models folder (default: <data>/models)
+    #[arg(short = 'm', long = "models")]
+    models: Option<PathBuf>,
+}
+
+impl ModelsDir {
+    fn resolve(self, data: Option<PathBuf>) -> Result<PathBuf> {
+        match self.models {
+            Some(dir) => util::ensure_dir(dir),
+            None => util::ensure_dir(config::data_dir(data)?.join("models")),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -146,26 +158,6 @@ struct NetworkArgs {
     /// This node's name on the network (default: its Tailscale host name)
     #[arg(long, env = "LAIR_NAME")]
     name: Option<String>,
-}
-
-impl NetworkArgs {
-    /// The peers finder and this node's automatic name: its Tailscale host name, else the host name.
-    async fn peers(&self, port: u16, http: reqwest::Client) -> (Peers, String) {
-        let socket = self.tailscale_socket.exists().then(|| self.tailscale_socket.clone());
-        let tailnet = socket.is_some();
-        let peers = Peers::new(socket, port, http);
-        let auto = match peers.status().await {
-            Some(s) if !s.host.is_empty() => s.host,
-            _ => std::fs::read_to_string("/etc/hostname")
-                .map(|h| h.trim().to_owned())
-                .ok()
-                .or_else(|| std::env::var("COMPUTERNAME").ok())
-                .unwrap_or_default(),
-        };
-        let auto = if auto.is_empty() { "lair".to_owned() } else { auto };
-        eprintln!("node name {auto}{}", if tailnet { ", looking for peers on the tailnet" } else { "" });
-        (peers, auto)
-    }
 }
 
 #[derive(Args)]
@@ -186,8 +178,12 @@ struct SkillArgs {
 
 impl SkillArgs {
     /// Skills created or installed here live in `<data>/skills`.
-    fn catalog(&self, data: &std::path::Path) -> Catalog {
-        if self.no_skills { Catalog::default() } else { Catalog::load(self.skills_dir.clone(), data.join("skills")) }
+    fn catalog(&self, data: &Path, assets: &Assets) -> Catalog {
+        if self.no_skills {
+            Catalog::off()
+        } else {
+            Catalog::load(self.skills_dir.clone(), data.join("skills"), assets.ids().to_vec())
+        }
     }
 }
 
@@ -205,95 +201,47 @@ struct ModelArgs {
     /// Threads to generate with (default: one per physical core, up to 16)
     #[arg(long)]
     threads: Option<i32>,
-    #[arg(long, default_value_t = 0.7)]
+    #[arg(long, default_value_t = Params::default().temperature)]
     temp: f32,
-    #[arg(long, default_value_t = 0.95)]
+    #[arg(long, default_value_t = Params::default().top_p)]
     top_p: f32,
     /// Sample only among the k likeliest tokens (0 = all)
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = Params::default().top_k)]
     top_k: i32,
     /// Drop tokens less likely than this share of the likeliest one (0 = off)
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = Params::default().min_p)]
     min_p: f32,
     /// Penalty on tokens the reply already used (1 = off)
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = Params::default().repeat_penalty)]
     repeat_penalty: f32,
     /// Max tokens per reply, thinking included
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = Params::default().max_tokens)]
     max_tokens: usize,
     /// How much reasoning models think: none, low (~512 tokens) or high (unlimited)
     #[arg(long)]
     reasoning: Option<Reasoning>,
     /// Model downloaded into the first models folder when no .gguf is found there: "auto" picks the
     /// best one for this machine from Hugging Face, a URL names one, "" never downloads
-    #[arg(long, env = "LAIR_DEFAULT_MODEL", default_value = "auto")]
+    #[arg(long, env = "LAIR_DEFAULT_MODEL", default_value = models::AUTO)]
     default_model: String,
 }
 
-/// What a first run downloads when Hugging Face can't be asked for something better.
-const FALLBACK_MODEL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf";
-/// A first run never downloads more than this without being asked to: bigger models are a choice.
-const FIRST_RUN_MAX: u64 = 6_000_000_000;
-/// How long a first run waits for Hugging Face before settling for the fallback.
-const FIRST_RUN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
-
 impl ModelArgs {
-    /// Without `-m`, models live in `<data>/models`, created on first use.
-    fn resolve(&mut self, data: &std::path::Path) -> Result<()> {
+    /// The folders to look for models in: `-m`, or `<data>/models` plus what Ollama downloaded. With no
+    /// model in any, the default one is downloaded first.
+    async fn prepare(&mut self, data: &Path, token: Option<&str>) -> Result<()> {
         if self.models.is_empty() {
-            self.models.push(models_dir(Some(data.join("models")))?);
-            // Models Ollama already downloaded run here too, with no second copy.
-            self.models.extend(engine::ollama_dir().filter(|d| d.join("manifests").is_dir()));
+            self.models.push(util::ensure_dir(data.join("models"))?);
+            self.models.extend(ollama_store::dir());
         }
-        Ok(())
-    }
-
-    /// First run with an empty models folder: download a model so lair starts with something to chat with.
-    async fn ensure_model(&self, token: Option<&str>) -> Result<()> {
-        let mut found = Vec::new();
-        for p in &self.models {
-            let _ = engine::collect_gguf(p, &mut found);
-            found.extend(engine::ollama_models(p).into_iter().map(|(_, blob)| blob));
-        }
-        if !found.is_empty() || self.default_model.is_empty() {
-            return Ok(());
-        }
-        let dir = self
-            .models
-            .iter()
-            .find(|p| p.is_dir())
-            .context("no .gguf found and no models folder to download one into")?;
-        if self.default_model != models::AUTO {
-            eprintln!("no models in {}; downloading the default one", dir.display());
-            return download(&self.default_model, dir, token).await.map(drop);
-        }
-        eprintln!("no models in {}; asking Hugging Face for the best one for this machine", dir.display());
-        let http = net::client();
-        let best = tokio::time::timeout(FIRST_RUN_PATIENCE, hub::first_model(&http, token, FIRST_RUN_MAX, dir)).await;
-        match best {
-            Ok(Ok((repo, files, why))) => {
-                eprintln!("picked {repo} ({})", why.join(", "));
-                fetch_all(&repo, &dir.join(hub::folder(&repo)), &files, token).await
-            }
-            Ok(Err(e)) => {
-                eprintln!("couldn't choose ({e:#}); downloading the default model instead");
-                download(FALLBACK_MODEL, dir, token).await.map(drop)
-            }
-            Err(_) => {
-                eprintln!("Hugging Face took too long; downloading the default model instead");
-                download(FALLBACK_MODEL, dir, token).await.map(drop)
-            }
-        }
-    }
-
-    fn tune(&self) -> Tune {
-        Tune { gpu_layers: self.gpu_layers, ctx: self.ctx, threads: self.threads }
+        cli::first_run(&self.models, &self.default_model, token).await
     }
 
     /// The engine and the default generation params. `must_chat` refuses to start with no chat model:
     /// the terminal has nothing to do then, while the server can still download one.
     fn load(&self, must_chat: bool) -> Result<(Engine, Params)> {
-        let engine = Engine::new(&self.models, self.tune())?;
+        let tune = Tune { gpu_layers: self.gpu_layers, ctx: self.ctx, threads: self.threads };
+        let engine = Engine::new(&self.models, tune)?;
         for m in engine.models() {
             let kind = if m.meta.embedding {
                 " (embeddings)"
@@ -311,14 +259,11 @@ impl ModelArgs {
             temperature: self.temp,
             top_p: self.top_p,
             max_tokens: self.max_tokens,
-            seed: None,
             reasoning: self.reasoning.unwrap_or_default(),
             top_k: self.top_k,
             min_p: self.min_p,
             repeat_penalty: self.repeat_penalty,
-            stop: Vec::new(),
-            grammar: None,
-            raw: false,
+            ..Params::default()
         };
         Ok((engine, params))
     }
@@ -335,237 +280,75 @@ fn find_model(engine: &Engine, name: Option<&str>) -> Result<String> {
     .map(|m| m.id.clone())
 }
 
-/// `dir`, or `<data>/models` by default; created if missing.
-fn models_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
-    let dir = dir.map_or_else(|| default_data_dir().map(|d| d.join("models")), Ok)?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    Ok(dir)
-}
-
-/// Prints a download's progress every 5%.
-fn progress() -> impl FnMut(u64, u64) {
-    let mut shown = 0;
-    move |done, total| {
-        if total > 0 && done * 20 / total > shown {
-            shown = done * 20 / total;
-            eprintln!("  {}% of {} MB", shown * 5, total / 1_000_000);
-        }
-    }
-}
-
-/// Downloads a .gguf into `dir`.
-async fn download(url: &str, dir: &std::path::Path, token: Option<&str>) -> Result<PathBuf> {
-    eprintln!("downloading {url}");
-    let dest = download::download(url, dir, token, progress()).await?;
-    eprintln!("saved {}", dest.display());
-    Ok(dest)
-}
-
-/// Downloads a repo's `files` into `dir`, resuming partial ones and checking each against its hash.
-async fn fetch_all(repo: &str, dir: &std::path::Path, files: &[hub::Remote], token: Option<&str>) -> Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let http = net::download_client();
-    for f in files {
-        let (url, dest) = (hub::file_url(repo, &f.path), dir.join(f.name()));
-        eprintln!("downloading {url}");
-        download::fetch(&http, &url, &dest, f.sha256.as_deref(), token, progress()).await?;
-        eprintln!("saved {}", dest.display());
-    }
-    Ok(())
-}
-
-/// `lair pull`: a URL downloads as is; anything else names a Hugging Face repo, and the file that fits
-/// this machine best (or the quant asked for) comes down with its vision projector, if it has one.
-async fn pull(spec: &str, models: &std::path::Path, token: Option<&str>) -> Result<()> {
-    if spec.starts_with("http://") || spec.starts_with("https://") {
-        return download(spec, models, token).await.map(drop);
-    }
-    let (repo, dir, files) = hub::plan(&net::client(), spec, models, token).await?;
-    eprintln!("using {repo}");
-    fetch_all(&repo, &dir, &files, token).await
-}
-
-/// `lair rm`: deletes the one model in `dir` that `name` names.
-fn rm(name: &str, dir: &std::path::Path) -> Result<()> {
-    let mut found = Vec::new();
-    engine::collect_gguf(dir, &mut found)?;
-    // A model is its file, or the first part of a split one; projectors go with their model.
-    let models: Vec<(String, PathBuf)> = found
-        .into_iter()
-        .filter_map(|p| {
-            let file = p.file_name()?.to_string_lossy().into_owned();
-            let id = match engine::shard_of(&file) {
-                Some((base, 1, _)) => base.to_owned(),
-                Some(_) => return None,
-                None => file.trim_end_matches(".gguf").to_owned(),
-            };
-            (!file.to_ascii_lowercase().contains("mmproj")).then_some((id, p))
-        })
-        .collect();
-    let exact: Vec<_> = models.iter().filter(|(id, _)| id == name).collect();
-    let matches = if exact.is_empty() { models.iter().filter(|(id, _)| id.contains(name)).collect() } else { exact };
-    match matches.as_slice() {
-        [(id, path)] => {
-            let freed = download::remove(dir, path)?;
-            println!("deleted {id} ({:.1} GB freed)", freed as f64 / 1e9);
-            Ok(())
-        }
-        [] => anyhow::bail!("no model matching {name:?} in {}; see `lair list`", dir.display()),
-        many => {
-            let names: Vec<&str> = many.iter().map(|(id, _)| id.as_str()).collect();
-            anyhow::bail!("{name:?} matches several models, name one: {}", names.join(", "))
-        }
-    }
-}
-
-/// `lair bench`: generates a fixed amount with the model as lair would run it, and again on the CPU
-/// alone when a GPU took part, so both sides of the speed estimate get a measurement.
-fn bench(mut engine: Engine, id: &str, params: &Params, store: &Store) -> Result<()> {
-    const TOKENS: usize = 96;
-    let msgs = [Msg {
-        role: "user".into(),
-        content: "Write a long, detailed essay about the history of computing.".into(),
-        ..Default::default()
-    }];
-    let p = Params { max_tokens: TOKENS, reasoning: Reasoning::Off, temperature: 0.0, ..params.clone() };
-    let mut bench: speed::Bench = store.kv("bench")?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-    let mut measure = |engine: &Engine, label: &str| -> Result<f32> {
-        eprintln!("measuring {id} {label}…");
-        let done = engine.generate(id, &msgs, &p, |_| true)?;
-        let l = engine.loaded().into_iter().find(|l| l.id == id).context("the model just ran")?;
-        let offload = l.gpu_layers as f32 / l.layers.max(1) as f32;
-        bench.record(id, l.size, offload, done.tps());
-        println!(
-            "{id} {label}: {:.1} tokens/s ({} of {} layers on the GPU, context {}, loaded in {:.1} s)",
-            done.tps(),
-            l.gpu_layers,
-            l.layers,
-            l.ctx,
-            done.load_us as f64 / 1e6
-        );
-        Ok(offload)
-    };
-    let offload = measure(&engine, "as lair runs it")?;
-    if offload > 0.0 {
-        // Kept under its own name: one sample per model would let the CPU run replace the GPU one.
-        engine.set_tune(Tune { gpu_layers: Some(0), ..engine.tune() });
-        let done = {
-            eprintln!("measuring {id} on the CPU alone…");
-            engine.generate(id, &msgs, &p, |_| true)?
-        };
-        let size = engine.loaded().into_iter().find(|l| l.id == id).map_or(0, |l| l.size);
-        bench.record(&format!("{id} (cpu)"), size, 0.0, done.tps());
-        println!("{id} on the CPU alone: {:.1} tokens/s", done.tps());
-    }
-    store.save_kv("bench", &serde_json::to_value(&bench)?)?;
-    println!("saved; lair now estimates other models' speed on this machine from this");
-    Ok(())
-}
-
-fn default_data_dir() -> Result<PathBuf> {
-    if cfg!(windows) {
-        let base = std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set; pass --data")?;
-        return Ok(PathBuf::from(base).join("lair"));
-    }
-    let base = match std::env::var_os("XDG_DATA_HOME") {
-        Some(d) => PathBuf::from(d),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set; pass --data")?).join(".local/share"),
-    };
-    Ok(base.join("lair"))
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    match Cli::parse().cmd {
+    let Cli { cmd, data, hf_token } = Cli::parse();
+    let token = hf_token.filter(|t| !t.is_empty());
+    match cmd {
         Cmd::Chat { name, mut model, system } => {
-            model.resolve(&default_data_dir()?)?;
-            model.ensure_model(std::env::var("HF_TOKEN").ok().as_deref()).await?;
+            model.prepare(&config::data_dir(data)?, token.as_deref()).await?;
             let (engine, params) = model.load(true)?;
             let id = find_model(&engine, name.as_deref())?;
             tokio::task::block_in_place(|| chat::run(&engine, &id, params, system))
         }
-        Cmd::Bench { name, mut model, data } => {
-            let data = data.map_or_else(default_data_dir, Ok)?;
-            std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
-            model.resolve(&data)?;
-            model.ensure_model(std::env::var("HF_TOKEN").ok().as_deref()).await?;
+        Cmd::Bench { name, mut model } => {
+            let data = config::data_dir(data)?;
+            model.prepare(&data, token.as_deref()).await?;
             let (engine, params) = model.load(true)?;
             let id = find_model(&engine, name.as_deref())?;
             let store = Store::open(&data.join("lair.db"))?;
-            tokio::task::block_in_place(|| bench(engine, &id, &params, &store))
+            tokio::task::block_in_place(|| bench::run(engine, &id, &params, &store))
         }
         Cmd::Update => update::run().await,
-        Cmd::Pull { model, models, hf_token } => pull(&model, &models_dir(models)?, hf_token.as_deref()).await,
-        Cmd::Rm { name, models } => rm(&name, &models_dir(models)?),
-        Cmd::List { models } => {
-            let dir = models_dir(models)?;
-            let mut found = Vec::new();
-            engine::collect_gguf(&dir, &mut found)?;
-            found.sort();
-            for path in &found {
-                let size = std::fs::metadata(path).map_or(0, |m| m.len());
-                println!("{:<48} {:>6.1} GB", path.strip_prefix(&dir).unwrap_or(path).display(), size as f64 / 1e9);
-            }
-            if found.is_empty() {
-                eprintln!(
-                    "no models in {}; `lair pull <repo>` downloads one, or `lair serve` fetches the best for this machine",
-                    dir.display()
-                );
-            }
-            Ok(())
-        }
-        Cmd::Serve { mut model, skills, host, port, token, data, workspace, searxng, hf_token, max_steps, network } => {
-            if token.is_none() && !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        Cmd::Pull { model, dir } => cli::pull(&model, &dir.resolve(data)?, token.as_deref()).await,
+        Cmd::Rm { name, dir } => cli::rm(&name, &dir.resolve(data)?),
+        Cmd::List { dir } => cli::list(&dir.resolve(data)?),
+        Cmd::Serve { mut model, skills, host, port, token: api_token, workspace, searxng, max_steps, network } => {
+            if api_token.is_none() && !host.parse::<IpAddr>().map_or(host == "localhost", |ip| ip.is_loopback()) {
                 eprintln!("warning: serving on {host} without --token; anyone who can reach it can use it");
             }
-            let data = data.map_or_else(default_data_dir, Ok)?;
-            let workspace = workspace.unwrap_or_else(|| data.join("workspace"));
-            for dir in [&data, &workspace] {
-                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            }
-            let store = Store::open(&data.join("lair.db"))?;
-            let saved = lair::saved(&store);
+            let data = config::data_dir(data)?;
+            let workspace = util::ensure_dir(workspace.unwrap_or_else(|| data.join("workspace")))?;
             let flags = Config {
                 searxng,
                 skills_index: skills.skills_index.clone(),
-                name: network.name.clone().filter(|n| !n.is_empty()),
-                peers: network.peers.clone(),
+                name: network.name,
+                peers: network.peers,
                 reasoning: model.reasoning,
-                trust_tailnet: None,
-                hf_token: hf_token.filter(|t| !t.is_empty()),
-                memory: None,
-                max_steps: max_steps.map(usize::from),
-            };
-            let config = flags.over(&saved);
-            model.resolve(&data)?;
-            model.ensure_model(config.hf_token.as_deref()).await?;
-            let (engine, defaults) = model.load(false)?;
+                hf_token: token,
+                max_steps,
+                ..Config::default()
+            }
+            .validated()?;
+            let store = Store::open(&data.join("lair.db"))?;
+            let saved = Config::saved(&store);
+            model.prepare(&data, flags.over(&saved).hf_token.as_deref()).await?;
+            let (engine, params) = model.load(false)?;
             if engine.models().is_empty() {
                 eprintln!("no models yet; download one from Settings → Models, or with `lair pull`");
             }
             let http = net::client();
-            let (peers, auto_name) = network.peers(port, http.clone()).await;
-            let bench = store.kv("bench")?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-            let peers = Arc::new(peers);
-            let lair = Lair {
-                models: Models::new(Arc::new(engine), peers.clone(), bench),
+            let peers = Peers::new(network.tailscale_socket, port, http.clone());
+            let auto_name = peers.auto_name().await;
+            eprintln!(
+                "node name {auto_name}{}",
+                if peers.on_tailnet() { ", looking for peers on the tailnet" } else { "" }
+            );
+            let assets = Assets::new(&skills.assets);
+            let lair = Lair::new(Parts {
+                engine: Arc::new(engine),
                 peers,
-                store,
-                skills: RwLock::new(skills.catalog(&data)),
-                http,
-                assets: Assets::new(&skills.assets),
-                workspace,
-                approvals: Approvals::default(),
-                downloads: download::Downloads::default(),
-                hub: hub::Cache::default(),
-                memory: memory::Memory::default(),
-                params: defaults,
-                config: RwLock::new(config),
-                flags,
                 auto_name,
-                stopping: tokio::sync::watch::Sender::new(false),
-            };
-            server::run(lair, token, format!("{host}:{port}")).await
+                store,
+                skills: skills.catalog(&data, &assets),
+                assets,
+                workspace,
+                params,
+                flags,
+                saved,
+                http,
+            })?;
+            server::run(lair, api_token, format!("{host}:{port}")).await
         }
     }
 }
@@ -574,52 +357,47 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn args(dir: &std::path::Path, url: &str) -> ModelArgs {
-        match Cli::parse_from(["lair", "chat", "-m", dir.to_str().unwrap(), "--default-model", url]).cmd {
-            Cmd::Chat { model, .. } => model,
-            _ => unreachable!(),
-        }
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lair-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[tokio::test]
     async fn the_default_model_is_only_fetched_into_an_empty_folder() {
-        let dir = std::env::temp_dir().join(format!("lair-ensure-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(args(&dir, "").ensure_model(None).await.is_ok());
-        assert!(args(&dir, "http://invalid.invalid/model.bin").ensure_model(None).await.is_err());
+        let dir = temp("first-run");
+        let models = [dir.clone()];
+        assert!(cli::first_run(&models, "", None).await.is_ok(), "\"\" never downloads");
+        assert!(cli::first_run(&models, "http://invalid.invalid/model.gguf", None).await.is_err(), "it tried");
         std::fs::write(dir.join("m.gguf"), b"x").unwrap();
-        assert!(args(&dir, "http://invalid.invalid/model.gguf").ensure_model(None).await.is_ok());
+        assert!(cli::first_run(&models, "http://invalid.invalid/model.gguf", None).await.is_ok(), "it didn't try");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn without_m_models_live_in_the_data_folder() {
-        let data = std::env::temp_dir().join(format!("lair-data-{}", std::process::id()));
-        let mut model = match Cli::parse_from(["lair", "run", "qwen"]).cmd {
-            Cmd::Chat { name, model, .. } => {
-                assert_eq!(name.as_deref(), Some("qwen"));
-                model
-            }
-            _ => unreachable!(),
+    fn pull_keeps_models_in_the_data_folder_by_default() {
+        let data = temp("data");
+        let Cli { cmd: Cmd::Pull { dir, .. }, data: flag, .. } =
+            Cli::parse_from(["lair", "pull", "qwen", "--data", data.to_str().unwrap()])
+        else {
+            unreachable!()
         };
-        assert_eq!((model.gpu_layers, model.ctx, model.default_model.as_str()), (None, None, "auto"));
-        model.resolve(&data).unwrap();
-        assert_eq!(model.models, [data.join("models")]);
+        assert_eq!(dir.resolve(flag).unwrap(), data.join("models"));
         assert!(data.join("models").is_dir());
         std::fs::remove_dir_all(&data).unwrap();
     }
 
     #[test]
     fn rm_deletes_the_one_model_a_name_points_at() {
-        let dir = std::env::temp_dir().join(format!("lair-rm-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp("rm");
         for f in ["qwen-Q4.gguf", "qwen-Q8.gguf", "gemma.gguf"] {
             std::fs::write(dir.join(f), b"x").unwrap();
         }
-        assert!(rm("qwen", &dir).unwrap_err().to_string().contains("several"));
-        assert!(rm("llama", &dir).is_err());
-        rm("gem", &dir).unwrap();
-        rm("qwen-Q4", &dir).unwrap();
+        assert!(cli::rm("qwen", &dir).unwrap_err().to_string().contains("several"));
+        assert!(cli::rm("llama", &dir).is_err());
+        cli::rm("gem", &dir).unwrap();
+        cli::rm("qwen-Q4", &dir).unwrap();
         assert!(
             !dir.join("gemma.gguf").exists() && !dir.join("qwen-Q4.gguf").exists() && dir.join("qwen-Q8.gguf").exists()
         );

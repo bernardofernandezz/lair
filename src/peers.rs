@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::engine::{Event, ModelEntry, Msg, Params};
+use crate::generation::{Event, Msg, Params};
+use crate::models::ModelEntry;
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 const WHOIS_TTL: Duration = Duration::from_secs(300);
@@ -71,8 +72,28 @@ fn is_tailscale_ip(ip: IpAddr) -> bool {
 }
 
 impl Peers {
-    pub fn new(socket: Option<PathBuf>, port: u16, http: reqwest::Client) -> Self {
+    /// `socket` is tailscaled's; without one there, only the peers named in the settings are used.
+    pub fn new(socket: PathBuf, port: u16, http: reqwest::Client) -> Self {
+        let socket = socket.exists().then_some(socket);
         Self { socket, port, http, nodes: RwLock::default(), whois: Mutex::default() }
+    }
+
+    /// Whether other nodes on the tailnet can be found.
+    pub fn on_tailnet(&self) -> bool {
+        self.socket.is_some()
+    }
+
+    /// This node's name when no setting gives one: its Tailscale host name, else the machine's.
+    pub async fn auto_name(&self) -> String {
+        let host = match self.status().await {
+            Some(s) if !s.host.is_empty() => s.host,
+            _ => std::fs::read_to_string("/etc/hostname")
+                .map(|h| h.trim().to_owned())
+                .ok()
+                .or_else(|| std::env::var("COMPUTERNAME").ok())
+                .unwrap_or_default(),
+        };
+        if host.is_empty() { "lair".to_owned() } else { host }
     }
 
     /// What discovery last said about the other nodes, for the settings UI.
@@ -86,7 +107,7 @@ impl Peers {
         Ok(reqwest::Client::builder().unix_socket(socket.as_path()).timeout(PROBE_TIMEOUT).build()?)
     }
 
-    // ponytail: no tailnet discovery on Windows, where tailscaled listens on a named pipe; `--peer` still
+    // shortcut: no tailnet discovery on Windows, where tailscaled listens on a named pipe; `--peer` still
     // works. Talk to the pipe if Windows users ask for discovery.
     #[cfg(not(unix))]
     fn local_api(&self) -> Result<reqwest::Client> {
@@ -277,7 +298,7 @@ mod tests {
 
     #[test]
     fn remote_models_are_named_after_their_node() {
-        let p = Peers::new(None, 8080, reqwest::Client::new());
+        let p = Peers::new(PathBuf::new(), 8080, reqwest::Client::new());
         let info = NodeInfo {
             name: "doom".into(),
             version: "0.1.0".into(),

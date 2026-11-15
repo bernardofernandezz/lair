@@ -3,7 +3,8 @@
 //! need one are ignored otherwise.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
@@ -13,47 +14,39 @@ use tower::ServiceExt;
 
 use super::{AppState, router};
 use crate::config::Config;
-use crate::engine::{Params, Reasoning};
-use crate::lair::Lair;
-use crate::models::Models;
+use crate::generation::{Params, Reasoning};
+use crate::lair::{Lair, Parts};
 use crate::peers::Peers;
 use crate::store::Store;
 
 fn state(token: Option<&str>) -> Arc<AppState> {
     let http = reqwest::Client::new();
-    let peers = Arc::new(Peers::new(None, 8080, http.clone()));
-    let workspace = std::env::temp_dir().join(format!("lair-api-{}", std::process::id()));
+    // One workspace per server: tests run side by side, and some count the files in theirs.
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let workspace = std::env::temp_dir().join(format!("lair-api-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&workspace);
     std::fs::create_dir_all(&workspace).unwrap();
-    let lair = Lair {
-        models: Models::new(crate::engine::tests::test_engine(), peers.clone(), Default::default()),
-        peers,
+    let lair = Lair::new(Parts {
+        engine: crate::engine::tests::test_engine(),
+        peers: Peers::new(PathBuf::new(), 8080, http.clone()),
+        auto_name: "test".into(),
         store: Store::memory(),
-        skills: RwLock::default(),
-        http,
+        skills: crate::skills::Catalog::off(),
         assets: Default::default(),
         workspace,
-        approvals: Default::default(),
-        downloads: Default::default(),
-        hub: Default::default(),
-        memory: Default::default(),
         params: Params {
             temperature: 0.0,
             top_p: 1.0,
             max_tokens: 64,
-            seed: None,
             reasoning: Reasoning::Off,
-            top_k: 0,
-            min_p: 0.0,
-            repeat_penalty: 0.0,
-            stop: vec![],
-            grammar: None,
-            raw: false,
+            ..Default::default()
         },
         flags: Config::default(),
-        config: RwLock::default(),
-        auto_name: "test".into(),
-        stopping: tokio::sync::watch::Sender::new(false),
-    };
+        saved: Config::default(),
+        http,
+    })
+    .unwrap();
     Arc::new(AppState { lair: Arc::new(lair), token: token.map(str::to_owned), addr: "127.0.0.1:0".into() })
 }
 
@@ -105,6 +98,20 @@ async fn the_apis_ask_for_the_token_and_answer_unknown_things_with_404() {
     let gone = json!({ "model": "no-such-model" });
     assert_eq!(call(&open, "DELETE", "/api/delete", None, Some(gone.clone())).await.0, StatusCode::NOT_FOUND);
     assert_eq!(call(&open, "POST", "/api/show", None, Some(gone)).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn every_api_words_its_errors_its_own_way_even_before_its_handlers() {
+    let s = state(Some("secret"));
+    let (_, ollama) = call(&s, "GET", "/api/tags", None, None).await;
+    assert!(ollama["error"].is_string(), "Ollama clients read a plain message: {ollama}");
+    let (_, anthropic) = call(&s, "POST", "/v1/messages", None, Some(json!({}))).await;
+    assert_eq!(anthropic["error"]["type"], "authentication_error", "{anthropic}");
+    let (_, openai) = call(&s, "GET", "/v1/models", None, None).await;
+    assert!(openai["error"]["message"].is_string(), "{openai}");
+    let open = state(None);
+    let (status, missing) = call(&open, "GET", "/api/nothing", None, None).await;
+    assert!(status == StatusCode::NOT_FOUND && missing["error"].is_string(), "{missing}");
 }
 
 #[tokio::test]
