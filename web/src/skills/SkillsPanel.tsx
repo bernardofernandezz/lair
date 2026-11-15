@@ -5,6 +5,7 @@ import { pick } from "../i18n";
 
 const T = pick({
   en: {
+    triggers: (w: string) => `Triggers: ${w}`,
     origin: { builtin: "Built in", extra: "Extra folder", created: "Made here", installed: "Installed" },
     turnOff: "Turn off", turnOn: "Turn on", edit: "Edit", delete: "Delete",
     none: "No skills yet. Import a .zip, install one from a link or make one here.",
@@ -21,6 +22,7 @@ const T = pick({
     emptyIndex: "The index lists no skills.",
   },
   pt: {
+    triggers: (w: string) => `Gatilhos: ${w}`,
     origin: { builtin: "Embutida", extra: "Pasta extra", created: "Criada aqui", installed: "Instalada" },
     turnOff: "Desligar", turnOn: "Ligar", edit: "Editar", delete: "Excluir",
     none: "Nenhuma skill ainda. Importe um .zip, instale de um endereço ou crie aqui.",
@@ -94,7 +96,7 @@ export function SkillsTab({ api }: Props) {
               <span className="skill-name">{s.name}</span>
               <span className="badge">{ORIGIN[s.origin]}</span>
               {s.description && <span className="skill-desc">{s.description}</span>}
-              <span className="skill-when">Gatilhos: {s.when.join(", ")}</span>
+              <span className="skill-when">{T.triggers(s.when.join(", "))}</span>
             </div>
             <div className="skill-actions">
               <button

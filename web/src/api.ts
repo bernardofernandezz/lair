@@ -4,8 +4,8 @@ const T = pick({
   en: { badToken: "That token doesn't open this server.", lost: "the connection dropped", answered: (s: number) => `The server answered ${s}.` },
   pt: { badToken: "Esse token não abre este servidor.", lost: "a conexão caiu", answered: (s: number) => `O servidor respondeu ${s}.` },
 });
-/** `node` is the peer machine the model runs on; absent for this one. */
 /**
+ * `node` is the peer machine the model runs on; absent for this one.
  * `size` is the file's bytes and `ctx` the context it runs with. `quant`, `family` and `params` come from
  * the GGUF itself; `tps` is tokens per second here (`measured` on this very model, else estimated from
  * others). All absent or zero from older peers.

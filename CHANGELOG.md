@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Anthropic API: `/v1/messages` (streaming, tools, thinking, images) and `/v1/messages/count_tokens`,
+  so Claude Code and other Anthropic clients run on local models. `x-api-key` is accepted as the
+  token, and `claude-…` model names mean `auto`.
+- Ollama names: `lair pull qwen3`, `/api/pull` with `llama3.2:3b` and the like map to fixed Hugging
+  Face repos. Models Ollama already downloaded are listed under their Ollama names, read in place.
+- Linux arm64 builds (Raspberry Pi 4 and later, Jetson, Graviton), picked by `install.sh` and `lair update`.
+- Homebrew: `brew tap bernardofernandezz/lair https://github.com/bernardofernandezz/lair && brew install bernardofernandezz/lair/lair`.
+  Each release regenerates `Formula/lair.rb`.
+- The agent takes up to 20 tool steps per reply instead of 8; `--max-steps` (`LAIR_MAX_STEPS`) sets it.
+
 ## 1.0.0
 
 lair now works out what to run and how. It reads the hardware, ranks what is on Hugging Face for it,

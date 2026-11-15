@@ -1,88 +1,33 @@
 import { useEffect, useRef, useState, type CSSProperties, type FocusEvent, type KeyboardEvent } from "react";
 import { AUTO, modelName, type Effort, type ModelInfo } from "./api";
 import { pick } from "./i18n";
+import { ModelTags } from "./ModelTags";
+import { bareName, displayName, groupByNode, MODES, thousands } from "./models";
 
 const T = pick({
   en: {
-    modes: [
-      { value: "none" as Effort, label: "Off", hint: "Answers right away, no thinking" },
-      { value: "low" as Effort, label: "Light", hint: "Thinks a little before answering" },
-      { value: "high" as Effort, label: "Deep", hint: "Thinks as long as it needs" },
-    ],
     model: "Model",
     reasoningOf: (m: string) => `, reasoning ${m}`,
     modelAndReasoning: "Model and reasoning",
     on: (n: string) => `On ${n}`,
     here: "This machine",
-    thinks: "Thinks",
-    vision: "Vision",
-    loaded: "In memory",
     reasoning: "Reasoning",
     more: "Get more models…",
     used: (u: string, s: string) => `${u} of ${s} context tokens used`,
-    auto: "Auto",
     autoHint: "lair picks per message: the biggest model that is fast right now, here or on your other machines",
-    speed: (t: string) => `${t} tok/s`,
-    measured: "Measured on this machine",
-    estimated: "Estimated from other models measured on this machine",
   },
   pt: {
-    modes: [
-      { value: "none" as Effort, label: "Desligado", hint: "Responde direto, sem pensar" },
-      { value: "low" as Effort, label: "Leve", hint: "Pensa um pouco antes de responder" },
-      { value: "high" as Effort, label: "Profundo", hint: "Pensa o quanto precisar" },
-    ],
     model: "Modelo",
     reasoningOf: (m: string) => `, raciocínio ${m}`,
     modelAndReasoning: "Modelo e raciocínio",
     on: (n: string) => `Em ${n}`,
     here: "Esta máquina",
-    thinks: "Pensa",
-    vision: "Visão",
-    loaded: "Na memória",
     reasoning: "Raciocínio",
     more: "Baixar mais modelos…",
     used: (u: string, s: string) => `${u} de ${s} tokens de contexto usados`,
-    auto: "Auto",
     autoHint: "o lair escolhe a cada mensagem: o maior modelo que está rápido agora, aqui ou nas suas outras máquinas",
-    speed: (t: string) => `${t} tok/s`,
-    measured: "Medido nesta máquina",
-    estimated: "Estimado a partir de outros modelos medidos nesta máquina",
   },
 });
-
-export const isEffort = (v: string): v is Effort => MODES.some((m) => m.value === v);
-
-export const MODES: { value: Effort; label: string; hint: string }[] = T.modes;
-
-// shortcut: read from the file name; read general.file_type from the GGUF if names outside the pattern show up.
-const QUANT = /(?:^|[-_.])(I?Q\d(?:_[KS0-9])?(?:_[A-Z0-9]+)?|BF16|F16|F32)(?=$|[-_.])/i;
-
-/** The quantization in a GGUF file name, like `Q4_K_M`, or null. */
-export const quantOf = (id: string) => id.match(QUANT)?.[1].toUpperCase() ?? null;
-
-/** Tokens per second as a tag's text: `~23 tok/s` when estimated, `23 tok/s` when measured; null when unknown. */
-export const speedLabel = (tps: number | undefined, measured?: boolean) =>
-  tps && tps > 0 ? `${measured ? "" : "~"}${T.speed(tps < 10 ? tps.toFixed(1) : tps.toFixed(0))}` : null;
-export const speedHint = (measured?: boolean) => (measured ? T.measured : T.estimated);
-
-/** What a model is called on screen: its own name without the quantization, or "Auto". */
-export const displayName = (m: ModelInfo) => (m.id === AUTO ? T.auto : bareName(modelName(m)));
-
-/** The name without its quantization, which is shown apart as a tag. */
-export const bareName = (name: string) => {
-  const q = quantOf(name);
-  return q ? name.replace(new RegExp(`[-_.]${q}$`, "i"), "") : name;
-};
-
-export const gb = (bytes: number) => `${(bytes / 1e9).toFixed(bytes < 10e9 ? 1 : 0)} GB`;
-
-/** Local models first, then each peer's, keeping their order. */
-export function groupByNode(models: ModelInfo[]): [string | null, ModelInfo[]][] {
-  const groups = new Map<string | null, ModelInfo[]>([[null, []]]);
-  for (const m of models) groups.set(m.node ?? null, [...(groups.get(m.node ?? null) ?? []), m]);
-  return [...groups].filter(([, ms]) => ms.length > 0);
-}
 
 type Props = {
   models: ModelInfo[];
@@ -181,9 +126,6 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
               ),
               ...ms.map((m) => {
                 const i = index++;
-                // The GGUF says its own quantization; names are the fallback for older peers.
-                const quant = m.quant || quantOf(modelName(m));
-                const speed = speedLabel(m.tps, m.measured);
                 return (
                   <li
                     key={m.id}
@@ -197,18 +139,7 @@ export function ModelChip({ models, value, onChange, effort, onEffort, disabled,
                     <span className="option-name" title={m.id === AUTO ? T.autoHint : undefined}>
                       {displayName(m)}
                     </span>
-                    <span className="option-meta">
-                      {quant && <span className="tag">{quant}</span>}
-                      {m.size ? <span className="tag">{gb(m.size)}</span> : null}
-                      {speed && (
-                        <span className="tag" title={speedHint(m.measured)}>
-                          {speed}
-                        </span>
-                      )}
-                      {m.thinks && <span className="tag">{T.thinks}</span>}
-                      {m.vision && <span className="tag">{T.vision}</span>}
-                      {m.loaded && <span className="tag is-on">{T.loaded}</span>}
-                    </span>
+                    <ModelTags {...m} name={modelName(m)} />
                   </li>
                 );
               }),
@@ -258,8 +189,7 @@ function ReasoningControl({ value, onChange }: { value: Effort; onChange: (e: Ef
 export function ContextMeter({ used, size }: { used: number; size: number }) {
   if (!used || !size) return null;
   const share = Math.min(1, used / size);
-  const k = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0).replace(".", ",")}k`);
-  const label = T.used(k(used), k(size));
+  const label = T.used(thousands(used), thousands(size));
   return (
     <span className={`context-meter${share > 0.8 ? " is-full" : ""}`} role="img" aria-label={label} title={label}>
       <svg viewBox="0 0 20 20" aria-hidden>

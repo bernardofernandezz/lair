@@ -31,7 +31,7 @@ pub fn parse<T: DeserializeOwned>(raw: &str) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{Done, Event, Finish};
+    use crate::generation::{Done, Event, Finish};
 
     #[test]
     fn generation_events_survive_the_trip_between_nodes() {

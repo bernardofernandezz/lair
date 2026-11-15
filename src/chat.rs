@@ -2,7 +2,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 
 use anyhow::Result;
 
-use crate::engine::{Engine, Msg, Params, Part};
+use crate::engine::Engine;
+use crate::generation::{Msg, Params, Part};
 
 pub fn run(engine: &Engine, model: &str, params: Params, system: Option<String>) -> Result<()> {
     let base: Vec<Msg> =

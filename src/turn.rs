@@ -2,19 +2,17 @@
 //! (plus any conversations it references), generate, stream the result, and save the reply. In agent
 //! mode the reply can be several steps: the model calls tools, lair runs them and feeds back results.
 
-use std::collections::hash_map::RandomState;
-use std::hash::BuildHasher;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::agent::{self, CallSplit, Piece, tools};
+use crate::agent::tools::{self, Ctx};
+use crate::agent::{self, CallSplit, Piece};
 use crate::attach::{self, Content};
-use crate::engine::{Event, Finish, Msg, Params, Reasoning, with_system};
+use crate::generation::{Event, Finish, Msg, Params, Reasoning, with_system};
 use crate::lair::Lair;
 use crate::store::{Message, Named, Ref, Settings, ToolStatus, ToolStep};
 
@@ -97,18 +95,28 @@ pub enum Out {
 /// Runs the turn, sending progress to `out`. If the client goes away, generation stops and what was
 /// produced so far is still saved.
 pub async fn run(lair: Arc<Lair>, conv: String, input: Input, out: mpsc::UnboundedSender<Out>) {
-    if let Err(e) = run_inner(&lair, &conv, input, &out).await {
+    if let Err(e) = run_inner(&lair, &conv, input, &out).await
+        && !e.is::<Gone>()
+    {
         let _ = out.send(Out::Error { message: format!("{e:#}") });
     }
-    // What was just said is worth remembering.
     lair.memory.wake();
     if *lair.stopping.borrow() {
         let _ = out.send(Out::Stopped {});
     }
 }
 
-/// The client left; stop quietly (everything produced so far is saved).
+/// The client left or the server is stopping: end quietly, with everything produced so far saved.
+#[derive(Debug)]
 struct Gone;
+
+impl std::fmt::Display for Gone {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("the client left or the server is stopping")
+    }
+}
+
+impl std::error::Error for Gone {}
 
 async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedSender<Out>) -> Result<()> {
     if input.content.trim().is_empty() && input.attachments.is_empty() {
@@ -118,11 +126,6 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     let Some(c) = lair.store.update(conv, settings)? else {
         bail!("conversation {conv} not found");
     };
-    let mut params = lair.params();
-    if let Some(e) = c.effort {
-        params.reasoning = e;
-    }
-
     let mut refs = Vec::new();
     for id in input.refs.iter().filter(|id| *id != conv) {
         if let Some(c) = lair.store.get(id)? {
@@ -139,19 +142,7 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
             Content::Image(path) => images.push(path.clone()),
         }
     }
-    // A model the conversation remembers may be gone (deleted, or its node offline): fall back to a local one.
-    let named = c.model.as_deref().and_then(|m| lair.models.resolve(Some(m), !images.is_empty()).ok());
-    let route = match named {
-        Some(route) => route,
-        None => lair.models.resolve(None, !images.is_empty()).map_err(anyhow::Error::msg)?,
-    };
-    let model = route.id;
-    if let Some(why) = route.why.filter(|_| c.model.as_deref() == Some(crate::models::AUTO)) {
-        let _ = out.send(Out::Model { id: model.clone(), why });
-    }
-    if !images.is_empty() && !lair.models.sees_images(&model) {
-        bail!("model {model} can't see images; pick a local vision model (with its mmproj next to the .gguf)");
-    }
+    let model = choose_model(lair, c.model.as_deref(), !images.is_empty(), out)?;
     let question = Message {
         role: "user".into(),
         content: input.content.clone(),
@@ -161,63 +152,77 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     };
     lair.store.append(conv, &question)?;
 
-    let mut history = to_prompt(&lair.store.messages(conv)?);
-    let last = history.last_mut().expect("the question was just saved");
-    if !refs.is_empty() {
-        last.content = format!("{}{}", reference_context(lair, &refs)?, input.content);
-    }
-    if !docs.is_empty() {
-        last.content = format!("{}{}", attach::sections(&docs), last.content);
-    }
+    // What lair adds before the question, nearest to it last.
+    let mut context = Vec::new();
     if let Some((notes, used)) = crate::memory::context(lair, &input.content, conv, MEMORY_CHARS).await {
-        // The cited chats and attachments already introduce the question themselves.
-        let lead = if refs.is_empty() && docs.is_empty() { "Current question: " } else { "" };
-        last.content = format!("{notes}{lead}{}", last.content);
+        context.push(notes);
         let _ = out.send(Out::Recalled { notes: used });
     }
+    if !docs.is_empty() {
+        context.push(attach::sections(&docs, c.agent));
+    }
+    if !refs.is_empty() {
+        context.push(reference_context(lair, &refs)?);
+    }
+    let mut history = to_prompt(&lair.store.messages(conv)?);
+    let last = history.last_mut().expect("the question was just saved");
+    last.content = with_context(&context, &last.content);
     // shortcut: only the current question carries its images; earlier ones stay out to fit the context.
     last.images = images;
     // ~3 characters per token; half the context for history, half for the reply.
-    let ctx = match lair.models.ctx(&model) {
-        0 => 8192,
-        n => n as usize,
-    };
-    trim(&mut history, ctx * 3 / 2);
-    let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history, lair.assets.ids());
+    trim(&mut history, lair.models.ctx(&model) as usize * 3 / 2);
+    let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history);
     if c.agent {
-        prompt = with_system(&prompt, &tools::system_prompt());
+        prompt = with_system(&prompt, &tools::system_prompt(&lair.config()));
     }
     if let Some(s) = &skill {
         let _ = out.send(Out::Skill(s.clone()));
     }
 
-    let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model: model.clone(), sources: 0 };
-    for _ in 0..agent::MAX_STEPS {
-        match step.generate(&model, prompt.clone(), params.clone(), c.agent).await? {
-            Err(Gone) => return Ok(()),
-            Ok(Generated { text, reasoning, call: None, finish }) => return step.finish(text, reasoning, finish),
-            Ok(Generated { text, reasoning, call: Some((raw, call)), .. }) => {
-                if !text.trim().is_empty() || reasoning.is_some() {
-                    lair.store.append(
-                        conv,
-                        &Message { role: "assistant".into(), content: text.clone(), reasoning, ..Default::default() },
-                    )?;
-                }
-                let Ok((name, output)) = step.use_tool(&raw, call).await? else {
-                    return Ok(());
-                };
-                prompt.push(Msg { role: "assistant".into(), content: format!("{text}{raw}"), ..Default::default() });
-                prompt.push(Msg {
-                    role: "user".into(),
-                    content: agent::render_result(&name, &output),
-                    ..Default::default()
-                });
-            }
+    let mut params = lair.params();
+    params.reasoning = c.effort.unwrap_or(params.reasoning);
+    let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model, agent: c.agent, sources: 0 };
+    let max_steps = lair.config().max_steps.unwrap_or(agent::MAX_STEPS);
+    for _ in 0..max_steps {
+        let Generated { text, reasoning, call, finish } = step.generate(prompt.clone(), params.clone()).await?;
+        let Some((raw, call)) = call else {
+            return step.finish(text, reasoning, finish);
+        };
+        if !text.trim().is_empty() || reasoning.is_some() {
+            let said = Message { role: "assistant".into(), content: text.clone(), reasoning, ..Default::default() };
+            lair.store.append(conv, &said)?;
         }
+        let (name, output) = step.use_tool(&raw, call).await?;
+        prompt.push(Msg { role: "assistant".into(), content: format!("{text}{raw}"), ..Default::default() });
+        prompt.push(Msg { role: "user".into(), content: agent::render_result(&name, &output), ..Default::default() });
     }
-    let note = format!("I stopped after {} tool steps. Ask me to continue if needed.", agent::MAX_STEPS);
+    let note = format!("I stopped after {max_steps} tool steps. Ask me to continue if needed.");
     let _ = out.send(Out::Answer { text: note.clone() });
     step.finish(note, None, Finish::Length)
+}
+
+/// The model for this turn: the one the conversation names, or one lair picks when it names none or the
+/// one it names is gone (deleted, or its node offline).
+fn choose_model(lair: &Lair, named: Option<&str>, vision: bool, out: &mpsc::UnboundedSender<Out>) -> Result<String> {
+    let route = match named.and_then(|m| lair.models.resolve(Some(m), vision).ok()) {
+        Some(route) => route,
+        None => lair.models.resolve(None, vision)?,
+    };
+    if let Some(why) = route.why.filter(|_| named == Some(crate::models::AUTO)) {
+        let _ = out.send(Out::Model { id: route.id.clone(), why });
+    }
+    if vision && !lair.models.sees_images(&route.id) {
+        bail!("model {} can't see images; pick a local vision model (with its mmproj next to the .gguf)", route.id);
+    }
+    Ok(route.id)
+}
+
+/// The question with what lair found for it before it, the question itself labelled as such.
+fn with_context(context: &[String], question: &str) -> String {
+    if context.is_empty() {
+        return question.to_owned();
+    }
+    format!("{}Current question: {question}", context.concat())
 }
 
 struct Generated {
@@ -237,21 +242,17 @@ struct Step<'a> {
     tokens: usize,
     tps: f32,
     model: String,
+    /// Agent mode: tool calls in the answer are run.
+    agent: bool,
     /// Web results numbered so far, for citations.
     sources: usize,
 }
 
 impl Step<'_> {
     /// One generation, streamed to the client. In agent mode it stops at the first tool call.
-    async fn generate(
-        &mut self,
-        model: &str,
-        prompt: Vec<Msg>,
-        params: Params,
-        agent: bool,
-    ) -> Result<Result<Generated, Gone>> {
-        let mut rx = self.lair.models.generate(model, prompt, params);
-        let mut split = CallSplit::new(tools::SPECS.iter().map(|s| s.name));
+    async fn generate(&mut self, prompt: Vec<Msg>, params: Params) -> Result<Generated> {
+        let mut rx = self.lair.models.generate(&self.model, prompt, params);
+        let mut split = self.agent.then(|| CallSplit::new(tools::SPECS.iter().map(|s| s.name)));
         let (mut text, mut reasoning) = (String::new(), String::new());
         let mut call = None;
         let mut finish = Finish::Stop;
@@ -274,15 +275,23 @@ impl Step<'_> {
                     gone |= self.out.send(Out::Thinking { text }).is_err();
                     vec![]
                 }
-                Event::Answer { text } if agent => split.push(&text),
-                Event::Answer { text } => vec![Piece::Text(text)],
+                Event::Answer { text } => match split.as_mut() {
+                    Some(split) => split.push(&text),
+                    None => vec![Piece::Text(text)],
+                },
                 Event::Done(done) => {
                     finish = done.finish_reason;
                     self.tokens = done.prompt_tokens + done.completion_tokens;
                     self.tps = done.tps();
-                    split.finish().into_iter().collect()
+                    split.as_mut().and_then(CallSplit::finish).into_iter().collect()
                 }
-                Event::Failed { message } => bail!(message),
+                Event::Failed { message } => {
+                    // The model's failure is what the client needs to hear, even if saving fails too.
+                    if let Err(e) = self.save(text, (!reasoning.is_empty()).then_some(reasoning)) {
+                        eprintln!("saving a failed reply: {e:#}");
+                    }
+                    bail!(message)
+                }
             };
             for piece in pieces {
                 match piece {
@@ -304,18 +313,14 @@ impl Step<'_> {
         let reasoning = (!reasoning.is_empty()).then_some(reasoning);
         if gone {
             self.save(text, reasoning)?;
-            return Ok(Err(Gone));
+            bail!(Gone);
         }
-        Ok(Ok(Generated { text, reasoning, call, finish }))
+        Ok(Generated { text, reasoning, call, finish })
     }
 
     /// Asks for approval when needed, runs the tool and saves the step. Returns what the model reads back.
-    async fn use_tool(
-        &mut self,
-        raw: &str,
-        call: Result<agent::Call, String>,
-    ) -> Result<Result<(String, String), Gone>> {
-        let id = random_id();
+    async fn use_tool(&mut self, raw: &str, call: Result<agent::Call, String>) -> Result<(String, String)> {
+        let id = crate::util::random_id();
         let (name, arguments) = match &call {
             Ok(c) => (c.name.clone(), c.arguments.clone()),
             Err(_) => ("?".to_owned(), Value::Null),
@@ -324,7 +329,11 @@ impl Step<'_> {
         let label = spec.map_or(name.as_str(), |s| s.label).to_owned();
         let subject =
             spec.and_then(|s| arguments.get(s.subject)).and_then(Value::as_str).unwrap_or_default().to_owned();
-        let needs_approval = spec.is_some_and(|s| s.needs_approval) && !self.lair.approvals.allowed(self.conv, &name);
+        // A tool the settings keep from working fails at once: nothing to approve.
+        let ready = spec.map(|s| s.ready(&self.lair.config()));
+        let needs_approval = spec.is_some_and(|s| s.needs_approval)
+            && ready == Some(Ok(()))
+            && !self.lair.approvals.allowed(self.conv, &name);
         let shown = Out::ToolCall {
             id: id.clone(),
             name: name.clone(),
@@ -334,31 +343,31 @@ impl Step<'_> {
             needs_approval,
         };
         if self.out.send(shown).is_err() {
-            return Ok(Err(Gone));
+            bail!(Gone);
         }
 
         let (status, output) = match (call, spec) {
-            (Err(e), _) => (
-                ToolStatus::Error,
-                format!("{e}. Use the format <tool_call>{{\"name\": ..., \"arguments\": {{...}}}}</tool_call>."),
-            ),
+            (Err(e), _) => (ToolStatus::Error, format!("{e}. {}", agent::FORMAT_HINT)),
             (Ok(_), None) => (ToolStatus::Error, format!("tool {name} does not exist")),
+            (Ok(_), Some(_)) if let Some(Err(off)) = ready => (ToolStatus::Error, off.to_owned()),
             (Ok(_), Some(spec)) => {
                 let allowed = if needs_approval {
                     let mut stopping = self.lair.stopping.subscribe();
                     tokio::select! {
                         d = self.lair.approvals.ask(self.conv, &name, &id) => d.map(|d| d.allow),
-                        _ = self.out.closed() => return Ok(Err(Gone)),
-                        _ = stopping.wait_for(|s| *s) => return Ok(Err(Gone)),
+                        _ = self.out.closed() => bail!(Gone),
+                        _ = stopping.wait_for(|s| *s) => bail!(Gone),
                     }
                 } else {
                     Some(true)
                 };
                 match allowed {
-                    Some(true) => match tools::run(self.lair, spec.tool, &arguments, &mut self.sources).await {
-                        Ok(text) => (ToolStatus::Ok, text),
-                        Err(e) => (ToolStatus::Error, format!("{e:#}")),
-                    },
+                    Some(true) => {
+                        match spec.run(&mut Ctx { lair: self.lair, sources: &mut self.sources }, &arguments).await {
+                            Ok(text) => (ToolStatus::Ok, text),
+                            Err(e) => (ToolStatus::Error, format!("{e:#}")),
+                        }
+                    }
                     Some(false) => (ToolStatus::Denied, "The user did not allow this action.".to_owned()),
                     None => {
                         (ToolStatus::Denied, "No answer from the user in time; the action was not taken.".to_owned())
@@ -372,7 +381,7 @@ impl Step<'_> {
             self.conv,
             &Message { role: "tool".into(), content: output.clone(), tool: Some(tool), ..Default::default() },
         )?;
-        Ok(Ok((name, output)))
+        Ok((name, output))
     }
 
     fn finish(&mut self, text: String, reasoning: Option<String>, finish: Finish) -> Result<()> {
@@ -396,10 +405,6 @@ impl Step<'_> {
             Message { role: "assistant".into(), content, reasoning, skill: self.skill.take(), ..Default::default() };
         self.lair.store.append(self.conv, &reply)
     }
-}
-
-pub(crate) fn random_id() -> String {
-    format!("{:016x}", RandomState::new().hash_one(SystemTime::now()))
 }
 
 /// The stored conversation as chat messages: tool steps become the call the model wrote and a
@@ -433,16 +438,15 @@ fn reference_context(lair: &Lair, refs: &[Ref]) -> Result<String> {
         let start = transcript.char_indices().rev().nth(REF_CHARS).map_or(0, |(i, _)| i);
         out.push_str(&format!("<chat title=\"{}\">\n{}</chat>\n\n", r.title, &transcript[start..]));
     }
-    out.push_str("Current question: ");
     Ok(out)
 }
 
 /// Drops the oldest messages (never the last one) until the history fits in `max_chars`, and never
 /// starts on an assistant message, which many chat templates reject.
 fn trim(history: &mut Vec<Msg>, max_chars: usize) {
-    let size = |h: &[Msg]| h.iter().map(|m| m.content.len()).sum::<usize>();
-    while history.len() > 1 && (size(history) > max_chars || history[0].role != "user") {
-        history.remove(0);
+    let mut size: usize = history.iter().map(|m| m.content.chars().count()).sum();
+    while history.len() > 1 && (size > max_chars || history[0].role != "user") {
+        size -= history.remove(0).content.chars().count();
     }
 }
 
@@ -466,6 +470,20 @@ mod tests {
         let mut h = vec![msg("user", "x".repeat(100).as_str())];
         trim(&mut h, 6);
         assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn the_question_keeps_all_it_says_after_what_lair_adds() {
+        assert_eq!(with_context(&[], "oi"), "oi", "nothing added, nothing labelled");
+        // A turn that failed leaves two user messages in a row, merged into the one the question ends.
+        let stored = |content: &str| Message { role: "user".into(), content: content.into(), ..Default::default() };
+        let mut history = to_prompt(&[stored("first try"), stored("second try")]);
+        let last = history.last_mut().unwrap();
+        last.content = with_context(&["<note/>\n\n".into(), "<chat/>\n\n".into()], &last.content);
+        assert_eq!(
+            last.content, "<note/>\n\n<chat/>\n\nCurrent question: first try\nsecond try",
+            "in order, then the question"
+        );
     }
 
     #[test]

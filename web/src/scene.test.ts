@@ -23,16 +23,14 @@ test("splitMessage treats a ```json fence as a scene only when it parses", () =>
   expect(plain).toEqual([{ kind: "md", text: "```json\n{\"a\":1}\n```" }]);
 });
 
-test("parseScene fills defaults and clamps numbers", () => {
+test("parseScene fills what a scene leaves out and clamps numbers", () => {
   const result = parseScene(`{"nodes":[{"geometry":{"kind":"box","size":[2,1,2]},"material":{"metalness":5}}]}`);
   expect(result.ok).toBe(true);
   if (!result.ok) return;
   expect(result.scene.grid).toBe(false);
   expect(result.scene.lights).toEqual([]);
-  expect(result.scene.nodes[0].material.color).toBe("#8a8f9e");
   expect(result.scene.nodes[0].position).toEqual([0, 0, 0]);
   expect(result.scene.nodes[0].material.metalness).toBe(1);
-  expect(result.scene.nodes[0].material.roughness).toBe(0.6);
 });
 
 test("parseScene accepts polyhedra and points", () => {

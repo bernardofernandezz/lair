@@ -1,19 +1,60 @@
 //! Every model this node can use, local or on a peer, behind one streaming `generate`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::engine::{Engine, Event, LoadedInfo, ModelEntry, Msg, Params, Part};
+use serde::{Deserialize, Serialize};
+
+use crate::engine::{CTX_FLOOR, Engine, LoadedInfo};
+use crate::generation::{Event, Msg, Params, Part};
 use crate::peers::Peers;
 use crate::speed::{Bench, Cand, Prediction};
 
 /// The model id that lets lair choose per request.
 pub const AUTO: &str = "auto";
+
+/// A model as the APIs list it. Peers on older versions send only the first fields.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ModelEntry {
+    /// `model` for local ones, `model@node` for a peer's.
+    pub id: String,
+    /// The peer it runs on; `None` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    pub thinks: bool,
+    pub loaded: bool,
+    /// Sees images (a projector was found next to it).
+    #[serde(default)]
+    pub vision: bool,
+    /// File size in bytes, to show and to judge whether it fits.
+    #[serde(default)]
+    pub size: u64,
+    /// Context size in tokens it runs with (what it will get, until it is loaded).
+    #[serde(default)]
+    pub ctx: u32,
+    /// The GGUF's architecture, parameter count and quantization.
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub params: u64,
+    #[serde(default)]
+    pub quant: String,
+    /// Turns text into vectors instead of chatting.
+    #[serde(default)]
+    pub embedding: bool,
+    /// Tokens per second: measured here, or estimated from other models measured here; 0 when unknown.
+    #[serde(default)]
+    pub tps: f32,
+    /// `tps` was measured running this very model.
+    #[serde(default)]
+    pub measured: bool,
+}
 
 /// A generation shorter than this says little about speed.
 const WORTH_TIMING: usize = 32;
@@ -24,11 +65,31 @@ pub struct Models {
     dir: Option<PathBuf>,
     /// Local generations running or queued, told to peers so `auto` can avoid a busy node.
     active: Arc<AtomicU32>,
-    /// Measured speeds; `unsaved` flips when a generation adds one.
+    /// Measured speeds, and the models measured again since they were last saved.
     bench: Arc<Mutex<Bench>>,
-    unsaved: Arc<AtomicBool>,
+    unsaved: Arc<Mutex<BTreeSet<String>>>,
     peers: Arc<Peers>,
 }
+
+/// Why no model can take a request.
+#[derive(Debug)]
+pub enum Unresolved {
+    /// The model it names (this id) isn't here or on any peer.
+    NotFound(String),
+    /// It leaves the choice to lair, and nothing installed can do what it asks.
+    NoneFits(&'static str),
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(f, "model {id} not found"),
+            Self::NoneFits(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for Unresolved {}
 
 /// The model a request runs on, and why when lair chose it.
 pub struct Route {
@@ -61,7 +122,7 @@ impl Models {
     /// Share of `m`'s layers on the GPU: as loaded, else as this machine would take a model its size.
     fn offload(&self, loaded: &[LoadedInfo], id: &str, size: u64) -> f32 {
         match loaded.iter().find(|l| l.id == id) {
-            Some(l) => l.gpu_layers as f32 / l.layers.max(1) as f32,
+            Some(l) => l.offload(),
             None => crate::hub::offload_guess(size, &crate::hw::hardware()),
         }
     }
@@ -117,19 +178,20 @@ impl Models {
         if self.is_local(id) {
             return self.engine.ctx_of(id);
         }
-        self.peers.models().iter().find(|m| m.id == id).map_or(0, |m| m.ctx)
+        // Older peers don't say; every model gets at least the floor.
+        self.peers.models().iter().find(|m| m.id == id).map(|m| m.ctx).filter(|&c| c > 0).unwrap_or(CTX_FLOOR)
     }
 
     /// The model for a request. A named one must exist. `auto` picks among every chat model, peers
     /// included; no name at all picks among the local ones, as clients that never name a model expect.
-    pub fn resolve(&self, id: Option<&str>, vision: bool) -> Result<Route, String> {
+    pub fn resolve(&self, id: Option<&str>, vision: bool) -> Result<Route, Unresolved> {
         let id = id.filter(|id| !id.is_empty());
         if let Some(id) = id.filter(|id| *id != AUTO) {
             let known = self.is_local(id) || self.peers.locate(id).is_some();
             return if known {
                 Ok(Route { id: id.to_owned(), why: None })
             } else {
-                Err(format!("model {id} not found"))
+                Err(Unresolved::NotFound(id.to_owned()))
             };
         }
         let here = self.active.load(Ordering::Relaxed);
@@ -149,8 +211,10 @@ impl Models {
             .collect();
         match crate::speed::pick(&cands, vision) {
             Some((i, why)) => Ok(Route { id: cands[i].id.clone(), why: Some(why) }),
-            None if vision => Err("no local model sees images; download a vision model".into()),
-            None => Err("no chat model is installed; download one in Settings or with `lair pull`".into()),
+            None if vision => Err(Unresolved::NoneFits("no local model sees images; download a vision model")),
+            None => {
+                Err(Unresolved::NoneFits("no chat model is installed; download one in Settings or with `lair pull`"))
+            }
         }
     }
 
@@ -184,9 +248,8 @@ impl Models {
                 && done.completion_tokens >= WORTH_TIMING
                 && let Some(l) = engine.loaded().iter().find(|l| l.id == id)
             {
-                let offload = l.gpu_layers as f32 / l.layers.max(1) as f32;
-                bench.lock().unwrap().record(&id, l.size, offload, done.tps());
-                unsaved.store(true, Ordering::Relaxed);
+                bench.lock().unwrap().record(&id, l.size, l.offload(), done.tps());
+                unsaved.lock().unwrap().insert(id.clone());
             }
             let _ = tx.send(match res {
                 Ok(done) => Event::Done(done),
@@ -207,7 +270,6 @@ impl Models {
         tokio::task::spawn_blocking(move || engine.embed(&id, &inputs)).await?
     }
 
-    /// Brings a local model into memory.
     pub async fn load(&self, id: &str) -> Result<()> {
         let (engine, id) = (self.engine.clone(), id.to_owned());
         tokio::task::spawn_blocking(move || engine.load(&id)).await?
@@ -227,17 +289,23 @@ impl Models {
         self.engine.reap();
     }
 
-    /// The models in memory.
     pub fn ps(&self) -> Vec<LoadedInfo> {
         self.engine.loaded()
     }
 
-    /// Where a local model's file is, to delete it.
-    pub fn path(&self, id: &str) -> Option<PathBuf> {
-        self.engine.models().into_iter().find(|m| m.id == id).map(|m| m.path)
+    /// Deletes the local model `id` from disk and returns the bytes freed; `None` when there's no such model.
+    pub async fn delete(&self, id: &str) -> Result<Option<u64>> {
+        let Some(path) = self.engine.models().into_iter().find(|m| m.id == id).map(|m| m.path) else {
+            return Ok(None);
+        };
+        let dir = self.dir().context("no models folder to delete from")?.to_owned();
+        // Out of memory first: Windows refuses to delete a file that is mapped.
+        self.unload(id);
+        let freed = tokio::task::spawn_blocking(move || crate::download::remove(&dir, &path)).await??;
+        self.refresh().await;
+        Ok(Some(freed))
     }
 
-    /// Local generations running or queued.
     pub fn active(&self) -> u32 {
         self.active.load(Ordering::Relaxed)
     }
@@ -248,13 +316,13 @@ impl Models {
         self.bench.lock().unwrap().predict(None, size, offload)
     }
 
-    /// Adds a measurement made outside a generation here (`lair bench`).
-    pub fn bench(&self) -> Bench {
-        self.bench.lock().unwrap().clone()
-    }
-
-    /// The measurements, if any were added since this was last asked: time to save them.
+    /// The models measured since this was last asked, if any: time to save them. Only those, so a
+    /// `lair bench` run meanwhile keeps what it measured of the others.
     pub fn unsaved_bench(&self) -> Option<Bench> {
-        self.unsaved.swap(false, Ordering::Relaxed).then(|| self.bench())
+        let keys = std::mem::take(&mut *self.unsaved.lock().unwrap());
+        let bench = self.bench.lock().unwrap();
+        let samples: std::collections::BTreeMap<_, _> =
+            keys.into_iter().filter_map(|k| Some((k.clone(), *bench.samples.get(&k)?))).collect();
+        (!samples.is_empty()).then_some(Bench { samples })
     }
 }

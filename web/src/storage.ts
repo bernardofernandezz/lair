@@ -1,6 +1,8 @@
 // Per-browser preferences. Storage can be unavailable (private mode, blocked site data); the UI works without it.
 
-export function load(key: string): string {
+type Key = "token" | "model" | "effort" | "sidebar";
+
+export function load(key: Key): string {
   try {
     return localStorage.getItem(`lair.${key}`) ?? "";
   } catch {
@@ -8,7 +10,7 @@ export function load(key: string): string {
   }
 }
 
-export function save(key: string, value: string) {
+export function save(key: Key, value: string) {
   try {
     if (value) localStorage.setItem(`lair.${key}`, value);
     else localStorage.removeItem(`lair.${key}`);

@@ -6,13 +6,18 @@
 //! GPU and each `K` the bytes per second that side moves. A model measured fully on one side gives
 //! that side's `K`; the estimate for any other model follows.
 //!
-//! ponytail: one constant per side. It is off for models that read a fraction of their weights per
+//! shortcut: one constant per side. It is off for models that read a fraction of their weights per
 //! token (mixture-of-experts run faster) and for tiny ones (overhead dominates). Fit a term per
 //! architecture from the recorded samples if the estimates need to be tighter.
 
 use std::collections::BTreeMap;
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::store::Store;
+
+const KEY: &str = "bench";
 
 /// Every measurement, by model id. Kept in the store, so estimates survive restarts.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -47,6 +52,19 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 }
 
 impl Bench {
+    /// The measurements stored. One lair can't read any more (an older format) counts as none.
+    pub fn load(store: &Store) -> Result<Self> {
+        Ok(store.kv(KEY)?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default())
+    }
+
+    /// Stores these measurements over the stored ones, model by model: `lair bench` and a running server
+    /// may each have measured some since they loaded. A failed read saves nothing rather than drop the rest.
+    pub fn save(&self, store: &Store) -> Result<()> {
+        let mut all = Self::load(store)?;
+        all.samples.extend(self.samples.iter().map(|(k, v)| (k.clone(), *v)));
+        store.save_kv(KEY, &serde_json::to_value(&all)?)
+    }
+
     /// Adds one generation's speed. A model that now runs with a different offload starts over.
     pub fn record(&mut self, id: &str, size: u64, offload: f32, tps: f32) {
         if !(tps.is_finite() && tps > 0.0) {
@@ -175,8 +193,19 @@ mod tests {
         assert_eq!(b.samples["a"], Sample { size: 4 * GB, offload: 0.0, tps: 5.0, n: 1 }, "a new setup starts over");
         b.record("a", 4 * GB, 0.0, f32::NAN);
         assert_eq!(b.samples["a"].n, 1);
-        let back: Bench = serde_json::from_value(serde_json::to_value(&b).unwrap()).unwrap();
-        assert_eq!(back, b);
+    }
+
+    #[test]
+    fn saving_keeps_what_another_process_stored() {
+        let store = Store::memory();
+        let mut bench_cli = Bench::default();
+        bench_cli.record("measured-by-cli", 4 * GB, 1.0, 60.0);
+        bench_cli.save(&store).unwrap();
+        let mut server = Bench::default();
+        server.record("measured-by-server", 4 * GB, 1.0, 30.0);
+        server.save(&store).unwrap();
+        let stored = Bench::load(&store).unwrap();
+        assert_eq!(stored.samples.keys().collect::<Vec<_>>(), ["measured-by-cli", "measured-by-server"]);
     }
 
     fn cand(id: &str, size: u64, tps: f32) -> Cand {

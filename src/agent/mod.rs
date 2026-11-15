@@ -15,13 +15,24 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::oneshot;
 
-use crate::engine::partial_suffix;
+use crate::util::partial_suffix;
 
 const OPEN: &str = "<tool_call>";
 const CLOSE: &str = "</tool_call>";
-/// Tool steps allowed in one reply before lair stops the loop.
-pub const MAX_STEPS: usize = 8;
-/// How long a call waits for the user to approve it.
+/// How a model calls a tool; shared by agent mode and the chat APIs' `tools`.
+pub const PROTOCOL: &str = "# Tools\n\
+     You can act by using tools. To use one, write exactly\n\
+     <tool_call>{\"name\": \"NAME\", \"arguments\": {...}}</tool_call>\n\
+     and stop. The result arrives in a <tool_response> message. Use one tool at a time, \
+     only when needed. If you say you will do something, make the call right away, in the same \
+     reply; don't end the reply just announcing it. With the result in hand, answer the user \
+     normally, without <tool_call>, in the user's language.\n";
+
+/// What the model is told when it wrote a call lair couldn't read.
+pub const FORMAT_HINT: &str = "Use the format <tool_call>{\"name\": ..., \"arguments\": {...}}</tool_call>.";
+
+/// Tool steps allowed in one reply before lair stops the loop, unless `--max-steps` says otherwise.
+pub const MAX_STEPS: usize = 20;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, PartialEq)]
@@ -278,6 +289,12 @@ impl Py {
     }
 }
 
+/// A call as the protocol writes it, for a conversation that carries one.
+pub fn render_call(name: &str, arguments: &Value) -> String {
+    format!("{OPEN}{}{CLOSE}", serde_json::json!({ "name": name, "arguments": arguments }))
+}
+
+/// A tool's result as the model reads it back.
 pub fn render_result(name: &str, output: &str) -> String {
     format!("<tool_response name=\"{name}\">\n{output}\n</tool_response>")
 }

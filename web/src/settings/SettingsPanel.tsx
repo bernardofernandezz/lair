@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Api, Config, MemoryStatus, Settings } from "../api";
 import { modelName } from "../api";
-import { isEffort, MODES } from "../Controls";
+import { isEffort, MODES, num } from "../models";
 import { SkillsTab } from "../skills/SkillsPanel";
 import { ModelsTab } from "./ModelsTab";
 import { pick } from "../i18n";
@@ -20,7 +20,7 @@ const T = pick({
     memory: "Memory", memoryOn: "Remember my chats and workspace files",
     memoryHint: "lair indexes your chats and the documents in the agent's workspace on this machine. The agent can search them, and with an embedding model a chat is shown the passages clearly related to your question. Nothing leaves this machine.",
     memorySaved: "Memory setting saved.",
-    memoryCount: (p: number, e: number) => `${p.toLocaleString()} passages indexed, ${e.toLocaleString()} searchable by meaning`,
+    memoryCount: (p: number, e: number) => `${num(p)} passages indexed, ${num(e)} searchable by meaning`,
     memoryModel: (m: string) => `Embedding model: ${m}`,
     memoryNoModel: "No embedding model yet: memory finds passages by their words only.",
     memoryGet: "Download the embedding model (0.4 GB)", memoryGetting: "Downloading; see the Models tab for progress.",
@@ -56,7 +56,7 @@ const T = pick({
     memory: "Memória", memoryOn: "Lembrar das minhas conversas e dos arquivos do workspace",
     memoryHint: "O lair indexa suas conversas e os documentos do workspace do agente nesta máquina. O agente pode buscar neles e, com um modelo de embedding, a conversa recebe os trechos claramente relacionados à sua pergunta. Nada sai desta máquina.",
     memorySaved: "Configuração de memória salva.",
-    memoryCount: (p: number, e: number) => `${p.toLocaleString()} trechos indexados, ${e.toLocaleString()} buscáveis por significado`,
+    memoryCount: (p: number, e: number) => `${num(p)} trechos indexados, ${num(e)} buscáveis por significado`,
     memoryModel: (m: string) => `Modelo de embedding: ${m}`,
     memoryNoModel: "Ainda sem modelo de embedding: a memória encontra trechos só pelas palavras.",
     memoryGet: "Baixar o modelo de embedding (0,4 GB)", memoryGetting: "Baixando; acompanhe na aba Modelos.",

@@ -18,6 +18,9 @@ fn asset() -> Result<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64", not(feature = "cuda"))) {
         return Ok(if cfg!(feature = "vulkan") { "lair-linux-x86_64-vulkan" } else { "lair-linux-x86_64-cpu" });
     }
+    if cfg!(all(target_os = "linux", target_arch = "aarch64", not(feature = "cuda"), not(feature = "vulkan"))) {
+        return Ok("lair-linux-arm64-cpu");
+    }
     if cfg!(all(target_os = "windows", target_arch = "x86_64", not(feature = "cuda"))) {
         return Ok(if cfg!(feature = "vulkan") { "lair-windows-x86_64-vulkan" } else { "lair-windows-x86_64-cpu" });
     }
@@ -34,8 +37,8 @@ pub async fn run() -> Result<()> {
         bail!("couldn't find the latest release at {REPO}/releases");
     }
     let current = concat!("v", env!("CARGO_PKG_VERSION"));
-    if tag == current {
-        println!("lair {current} is already the latest version");
+    if !is_newer(&tag, current) {
+        println!("lair {current} is up to date (latest release: {tag})");
         return Ok(());
     }
 
@@ -43,6 +46,10 @@ pub async fn run() -> Result<()> {
     // Through symlinks to the real file. Not on Windows, where canonical paths (`\\?\C:\...`) can't be a
     // working directory.
     let exe = if cfg!(windows) { exe } else { exe.canonicalize()? };
+    // Swapping the file under brew would leave it believing the old version is installed.
+    if exe.components().any(|c| c.as_os_str() == "Cellar") {
+        bail!("this lair was installed with Homebrew; update it with `brew upgrade lair` ({tag} is out)");
+    }
     let dir = exe.parent().context("the lair binary has no parent folder")?;
     // Next to the binary, so the final rename stays on one filesystem and replaces it atomically.
     let tmp = dir.join(".lair-update");
@@ -87,6 +94,18 @@ async fn install(http: &reqwest::Client, base: &str, asset: &str, tmp: &Path, ex
     Ok(())
 }
 
+/// Whether release `tag` is a later version than `current` (both `vX.Y.Z`), so a newer local build is never
+/// "updated" back to an older release. A prerelease (`-rc1`) comes before the release of the same numbers.
+fn is_newer(tag: &str, current: &str) -> bool {
+    // The numbers, then whether it is a release: `false < true`, so `1.2.0-rc1 < 1.2.0`.
+    let version = |v: &str| -> (Vec<u64>, bool) {
+        let v = v.trim_start_matches('v');
+        let (numbers, pre) = v.split_once('-').map_or((v, false), |(n, _)| (n, true));
+        (numbers.split('.').map(|n| n.parse().unwrap_or(0)).collect(), !pre)
+    };
+    version(tag) > version(current)
+}
+
 /// The hash `sha256sum` printed for `file`: lines read `<hex>  <name>` (or `<hex> *<name>` in binary mode).
 fn checksum_for(sums: &str, file: &str) -> Option<String> {
     sums.lines().find_map(|line| {
@@ -100,6 +119,17 @@ fn checksum_for(sums: &str, file: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_later_versions_are_updates() {
+        assert!(is_newer("v1.1.0", "v1.0.0"));
+        assert!(is_newer("v1.10.0", "v1.9.0"), "numeric, not string, order");
+        assert!(!is_newer("v1.0.0", "v1.0.0"));
+        assert!(!is_newer("v1.0.0", "v1.1.0"), "a newer local build isn't downgraded");
+        assert!(is_newer("v2.0.0-rc1", "v1.0.0"));
+        assert!(is_newer("v1.2.0", "v1.2.0-rc1"), "a release follows its own prerelease");
+        assert!(!is_newer("v1.2.0-rc1", "v1.2.0"));
+    }
 
     #[test]
     fn checksums_are_found_by_exact_file_name() {

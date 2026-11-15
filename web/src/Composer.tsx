@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Api, Conversation, FileTypes, Ref } from "./api";
 import { mentionAt, useMentionOptions } from "./conversations/mention";
 import { pick } from "./i18n";
+import { num } from "./models";
 
 const T = pick({
   en: {
+    remove: (n: string) => `Remove ${n}`,
     imagesDropped: "This model can't see images; they were taken out of the message.",
     noVision: "This model can't see images. Pick a vision model (with its mmproj next to the .gguf).",
     accepted: "Text documents, code, .pdf and images are accepted.",
@@ -20,6 +22,7 @@ const T = pick({
     send: "Send",
   },
   pt: {
+    remove: (n: string) => `Remover ${n}`,
     imagesDropped: "Esse modelo não enxerga imagens; elas foram tiradas da mensagem.",
     noVision: "Esse modelo não enxerga imagens. Escolha um modelo de visão (com o mmproj ao lado do .gguf).",
     accepted: "Aceito documentos de texto, código, .pdf e imagens.",
@@ -115,7 +118,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
   }
 
   const remove = (f: Pending) => setFiles(files.filter((x) => x !== f));
-  const kB = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} kB` : `${(n / (1024 * 1024)).toFixed(1)} MB`);
+  const kB = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} kB` : `${num(n / (1024 * 1024), 1)} MB`);
 
   function submit() {
     const text = draft.trim();
@@ -190,7 +193,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
           {refs.map((r) => (
             <span key={r.id} className="ref-chip">
               <span>{r.title}</span>
-              <button type="button" aria-label={`Remover ${r.title}`} onClick={() => setRefs(refs.filter((x) => x.id !== r.id))}>
+              <button type="button" aria-label={T.remove(r.title)} onClick={() => setRefs(refs.filter((x) => x.id !== r.id))}>
                 ×
               </button>
             </span>
@@ -207,7 +210,7 @@ export function Composer({ api, conversations, current, busy, hello, tools, visi
               <span>
                 {f.file.name} <em>{kB(f.file.size)}</em>
               </span>
-              <button type="button" aria-label={`Remover ${f.file.name}`} onClick={() => remove(f)}>
+              <button type="button" aria-label={T.remove(f.file.name)} onClick={() => remove(f)}>
                 ×
               </button>
             </span>

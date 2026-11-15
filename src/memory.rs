@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::lair::Lair;
-use crate::store::Chunk;
+use crate::store::{CHAT, Chunk, FILE};
 
 /// The embedding model lair offers to download: small, multilingual, MIT-licensed.
 pub const EMBED_REPO: &str = "gpustack/bge-m3-GGUF";
@@ -33,6 +33,8 @@ const EACH: usize = 30;
 const RELATED: f32 = 0.45;
 /// A piece this similar is put in front of the model without being asked for.
 const CLEARLY_RELATED: f32 = 0.55;
+/// What a search of memory is told when the settings turn it off.
+pub const OFF: &str = "memory is turned off in the settings";
 /// Where the indexer of chats got to: the last message id it read.
 const CHAT_MARK: &str = "memory.chat";
 const IDLE: Duration = Duration::from_secs(300);
@@ -120,8 +122,7 @@ fn documents(root: &Path) -> Vec<(String, i64)> {
                 }
                 continue;
             }
-            let ext = path.extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
-            if !crate::attach::TYPES.documents.contains(&ext.as_str()) || meta.len() > MAX_FILE {
+            if !crate::attach::is_document(&name) || meta.len() > MAX_FILE {
                 continue;
             }
             let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok());
@@ -133,13 +134,6 @@ fn documents(root: &Path) -> Vec<(String, i64)> {
     let mut out = Vec::new();
     walk(root, root, &mut out);
     out
-}
-
-fn read_document(path: &Path) -> Option<String> {
-    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
-        return pdf_extract::extract_text_from_mem(&std::fs::read(path).ok()?).ok();
-    }
-    std::fs::read_to_string(path).ok()
 }
 
 /// Brings memory up to date with the chats and the workspace: new messages, new or changed files,
@@ -154,24 +148,24 @@ pub fn sync(lair: &Lair) -> Result<()> {
         for (id, conv, role, content) in &batch {
             let who = if role == "user" { "User" } else { "Assistant" };
             let pieces: Vec<String> = chunk(content).into_iter().map(|p| format!("{who}: {p}")).collect();
-            store.add_chunks("chat", conv, *id, &pieces, false)?;
+            store.add_chunks(CHAT, conv, *id, &pieces, false)?;
         }
         store.save_kv(CHAT_MARK, &json!(mark))?;
     }
 
-    let known: HashMap<String, i64> = store.chunk_refs("file")?.into_iter().collect();
+    let known: HashMap<String, i64> = store.chunk_refs(FILE)?.into_iter().collect();
     let found = documents(&lair.workspace);
     for (rel, modified) in &found {
         if known.get(rel) == Some(modified) {
             continue;
         }
         // An unreadable or empty file keeps one empty piece, so it isn't read again until it changes.
-        let pieces = read_document(&lair.workspace.join(rel)).map(|t| chunk(&t)).unwrap_or_default();
+        let pieces = crate::attach::read_text(&lair.workspace.join(rel)).map(|t| chunk(&t)).unwrap_or_default();
         let pieces = if pieces.is_empty() { vec![String::new()] } else { pieces };
-        store.add_chunks("file", rel, *modified, &pieces, true)?;
+        store.add_chunks(FILE, rel, *modified, &pieces, true)?;
     }
     for rel in known.keys().filter(|rel| !found.iter().any(|(f, _)| f == *rel)) {
-        store.drop_chunks("file", rel)?;
+        store.drop_chunks(FILE, rel)?;
     }
     Ok(())
 }
@@ -188,6 +182,14 @@ async fn embed_pending(lair: &Lair) -> Result<()> {
         let (vectors, _) = lair.models.embed(&model, texts).await?;
         lair.store.set_vectors(&model, &ids.into_iter().zip(vectors).collect::<Vec<_>>())?;
     }
+}
+
+/// Forgets everything; chats and files are indexed again from scratch (unless memory is off).
+pub fn forget(lair: &Lair) -> Result<()> {
+    lair.store.clear_chunks()?;
+    lair.store.save_kv(CHAT_MARK, &json!(0))?;
+    lair.memory.wake();
+    Ok(())
 }
 
 /// Keeps memory up to date for as long as the server runs: after each turn or upload, and now and
@@ -214,6 +216,9 @@ pub async fn run(lair: Arc<Lair>) {
 /// What memory holds that relates to `query`, best first, leaving out the conversation `skip` (the
 /// one asking). Words and meaning both count; with no embedding model, words alone.
 pub async fn recall(lair: &Lair, query: &str, skip: Option<&str>, k: usize) -> Result<Vec<Hit>> {
+    if !lair.config().memory() {
+        anyhow::bail!(OFF);
+    }
     let by_words = lair.store.chunks_by_words(query, EACH)?;
     let by_meaning = match lair.models.embedder() {
         Some(model) if !query.trim().is_empty() => {
@@ -229,14 +234,12 @@ pub async fn recall(lair: &Lair, query: &str, skip: Option<&str>, k: usize) -> R
     let ids = rrf(&by_words, &by_meaning.iter().map(|(id, _)| *id).collect::<Vec<_>>());
     let mut hits = Vec::new();
     for id in ids {
-        let Some(Chunk { source, of, text, .. }) = lair.store.chunk(id)? else { continue };
-        if text.is_empty() || (source == "chat" && Some(of.as_str()) == skip) {
+        let Some(Chunk { source, of, text }) = lair.store.chunk(id)? else { continue };
+        if text.is_empty() || (source == CHAT && Some(of.as_str()) == skip) {
             continue;
         }
-        let title = match source.as_str() {
-            "chat" => lair.store.get(&of)?.map_or_else(String::new, |c| c.title),
-            _ => of.clone(),
-        };
+        let title =
+            if source == CHAT { lair.store.get(&of)?.map_or_else(String::new, |c| c.title) } else { of.clone() };
         hits.push(Hit { source, of, title, text, similarity: similar.get(&id).copied() });
         if hits.len() == k {
             break;
@@ -249,9 +252,10 @@ pub async fn recall(lair: &Lair, query: &str, skip: Option<&str>, k: usize) -> R
 /// so an unrelated chat never colours an answer. `None` when memory is off, has no embedding model
 /// or finds nothing that close. Returns the text to put before the question and what it came from.
 pub async fn context(lair: &Lair, question: &str, conv: &str, max_chars: usize) -> Option<(String, Vec<Hit>)> {
-    if !lair.config().memory() || lair.models.embedder().is_none() {
+    if !lair.config().memory() {
         return None;
     }
+    lair.models.embedder()?;
     let hits: Vec<Hit> = recall(lair, question, Some(conv), 8)
         .await
         .ok()?

@@ -1,11 +1,14 @@
 //! Runtime settings. The command line and the settings UI write the same [`Config`]; the live one is
 //! the flags laid over what the UI saved, so a flag wins until lair restarts without it.
 
-use anyhow::{Result, bail};
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::engine::Reasoning;
+use crate::generation::Reasoning;
+use crate::store::Store;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -34,23 +37,35 @@ pub struct Config {
     /// Chats recall related past conversations and workspace files; unset means yes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<bool>,
+    /// Tool steps the agent may take in one reply; unset means [`crate::agent::MAX_STEPS`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<usize>,
 }
 
 impl Config {
+    /// What the UI saved. A document lair can't read any more (an old field, a broken row) is set aside
+    /// with a warning, and the next save replaces it.
+    pub fn saved(store: &Store) -> Config {
+        match store.config().and_then(|v| Ok(serde_json::from_value(v)?)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("warning: ignoring the saved settings: {e:#}");
+                Config::default()
+            }
+        }
+    }
+
     /// `self` (the flags) wins field by field; peers from both are kept.
     pub fn over(&self, saved: &Config) -> Config {
-        let mut peers = self.peers.clone();
-        peers.extend(saved.peers.iter().filter(|p| !self.peers.contains(p)).cloned());
-        Config {
-            searxng: self.searxng.clone().or_else(|| saved.searxng.clone()),
-            skills_index: self.skills_index.clone().or_else(|| saved.skills_index.clone()),
-            name: self.name.clone().or_else(|| saved.name.clone()),
-            peers,
-            reasoning: self.reasoning.or(saved.reasoning),
-            trust_tailnet: self.trust_tailnet.or(saved.trust_tailnet),
-            hf_token: self.hf_token.clone().or_else(|| saved.hf_token.clone()),
-            memory: self.memory.or(saved.memory),
-        }
+        // Unset fields aren't serialized, so laying one document over the other keeps what each sets.
+        let (Value::Object(mut doc), Value::Object(flags)) = (json(saved), json(self)) else {
+            unreachable!("a Config serializes to an object")
+        };
+        doc.extend(flags);
+        let mut live: Config = serde_json::from_value(Value::Object(doc)).expect("two valid configs merge into one");
+        live.peers = self.peers.clone();
+        live.peers.extend(saved.peers.iter().filter(|p| !self.peers.contains(p)).cloned());
+        live
     }
 
     /// `self` with the fields in `change` replaced; `null` or `""` clears one, the others stay.
@@ -58,7 +73,7 @@ impl Config {
         let mut doc = serde_json::to_value(self)?;
         if let (Value::Object(doc), Value::Object(change)) = (&mut doc, change) {
             // The UI is shown `true` in place of a saved token; sending that back changes nothing.
-            doc.extend(change.into_iter().filter(|(k, v)| !(k == "hfToken" && v.is_boolean())));
+            doc.extend(change.into_iter().filter(|(k, v)| !(k == HF_TOKEN && v.is_boolean())));
             doc.retain(|_, v| !v.is_null());
         }
         serde_json::from_value::<Config>(doc)?.validated()
@@ -74,15 +89,15 @@ impl Config {
 
     /// For showing: the token is replaced by `true`, so it never leaves the server again.
     pub fn redacted(&self) -> Value {
-        let mut v = serde_json::to_value(self).unwrap_or_default();
+        let mut v = json(self);
         if self.hf_token.is_some() {
-            v["hfToken"] = Value::Bool(true);
+            v[HF_TOKEN] = Value::Bool(true);
         }
         v
     }
 
     /// Trims every value, drops empty ones, and refuses what lair could not use.
-    pub fn validated(self) -> Result<Config> {
+    pub fn validated(mut self) -> Result<Config> {
         let text = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
         let url = |v: Option<String>, what: &str| -> Result<Option<String>> {
             let v = text(v);
@@ -91,33 +106,60 @@ impl Config {
             }
             Ok(v)
         };
-        let name = text(self.name);
-        if name.as_deref().is_some_and(|n| n.len() > 64) {
+        self.name = text(self.name);
+        if self.name.as_deref().is_some_and(|n| n.len() > 64) {
             bail!("the node name is over 64 characters");
         }
-        let peers: Vec<String> = self.peers.iter().map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect();
-        for p in &peers {
+        self.peers = self.peers.iter().map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect();
+        for p in &self.peers {
             if p.contains(['/', ' ']) || p.starts_with("http") {
                 bail!("\"{p}\" does not look like an address: use host:port (e.g. 10.1.2.3:8080)");
             }
-            if p.split(':').nth(1).is_some_and(|port| port.parse::<u16>().is_err()) {
+            if p.split(':').nth(1).is_some_and(|port| port.parse::<u16>().ok().filter(|&n| n > 0).is_none()) {
                 bail!("the port in \"{p}\" is not a number from 1 to 65535");
             }
         }
-        if peers.len() > 64 {
+        if self.peers.len() > 64 {
             bail!("at most 64 peers");
         }
-        Ok(Config {
-            searxng: url(self.searxng, "the SearXNG URL")?,
-            skills_index: url(self.skills_index, "the skills index")?,
-            name,
-            peers,
-            reasoning: self.reasoning,
-            trust_tailnet: self.trust_tailnet,
-            hf_token: text(self.hf_token),
-            memory: self.memory,
-        })
+        if self.max_steps.is_some_and(|n| !STEPS.contains(&n)) {
+            bail!("the agent's step limit must be from {} to {}", STEPS.start(), STEPS.end());
+        }
+        self.searxng = url(self.searxng, "the SearXNG URL")?;
+        self.skills_index = url(self.skills_index, "the skills index")?;
+        self.hf_token = text(self.hf_token);
+        Ok(self)
     }
+}
+
+/// Where lair keeps its data: `dir` when given, else `$XDG_DATA_HOME/lair` (`~/.local/share/lair`), or
+/// `%LOCALAPPDATA%\lair` on Windows. Created if missing.
+pub fn data_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
+    let dir = match dir {
+        Some(d) => d,
+        None if cfg!(windows) => {
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set; pass --data")?)
+                .join("lair")
+        }
+        None => match std::env::var_os("XDG_DATA_HOME") {
+            Some(d) => PathBuf::from(d),
+            None => {
+                PathBuf::from(std::env::var_os("HOME").context("HOME is not set; pass --data")?).join(".local/share")
+            }
+        }
+        .join("lair"),
+    };
+    crate::util::ensure_dir(dir)
+}
+
+/// The steps an agent may be allowed per reply.
+const STEPS: std::ops::RangeInclusive<usize> = 1..=200;
+
+/// The key the token goes by in the documents the UI reads and patches.
+const HF_TOKEN: &str = "hfToken";
+
+fn json(c: &Config) -> Value {
+    serde_json::to_value(c).expect("a Config always serializes")
 }
 
 #[cfg(test)]
@@ -143,6 +185,11 @@ mod tests {
     }
 
     #[test]
+    fn an_unset_field_is_left_out_so_saved_settings_show_through_flags() {
+        assert_eq!(json(&Config::default()), serde_json::json!({}), "every field needs skip_serializing_if");
+    }
+
+    #[test]
     fn validation_trims_clears_and_refuses() {
         let c = Config {
             searxng: Some("  ".into()),
@@ -155,8 +202,10 @@ mod tests {
         assert_eq!((c.searxng, c.name.as_deref(), c.peers), (None, Some("doom"), vec!["10.0.0.1:8080".to_owned()]));
         for bad in [
             Config { searxng: Some("localhost:8888".into()), ..Default::default() },
+            Config { max_steps: Some(0), ..Default::default() },
             Config { peers: vec!["http://doom".into()], ..Default::default() },
             Config { peers: vec!["doom:70000".into()], ..Default::default() },
+            Config { peers: vec!["doom:0".into()], ..Default::default() },
             Config { name: Some("x".repeat(65)), ..Default::default() },
         ] {
             assert!(bad.validated().is_err());

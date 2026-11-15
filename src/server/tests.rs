@@ -3,7 +3,8 @@
 //! need one are ignored otherwise.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
@@ -13,47 +14,39 @@ use tower::ServiceExt;
 
 use super::{AppState, router};
 use crate::config::Config;
-use crate::engine::{Params, Reasoning};
-use crate::lair::Lair;
-use crate::models::Models;
+use crate::generation::{Params, Reasoning};
+use crate::lair::{Lair, Parts};
 use crate::peers::Peers;
 use crate::store::Store;
 
 fn state(token: Option<&str>) -> Arc<AppState> {
     let http = reqwest::Client::new();
-    let peers = Arc::new(Peers::new(None, 8080, http.clone()));
-    let workspace = std::env::temp_dir().join(format!("lair-api-{}", std::process::id()));
+    // One workspace per server: tests run side by side, and some count the files in theirs.
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let workspace = std::env::temp_dir().join(format!("lair-api-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&workspace);
     std::fs::create_dir_all(&workspace).unwrap();
-    let lair = Lair {
-        models: Models::new(crate::engine::tests::test_engine(), peers.clone(), Default::default()),
-        peers,
+    let lair = Lair::new(Parts {
+        engine: crate::engine::tests::test_engine(),
+        peers: Peers::new(PathBuf::new(), 8080, http.clone()),
+        auto_name: "test".into(),
         store: Store::memory(),
-        skills: RwLock::default(),
-        http,
+        skills: crate::skills::Catalog::off(),
         assets: Default::default(),
         workspace,
-        approvals: Default::default(),
-        downloads: Default::default(),
-        hub: Default::default(),
-        memory: Default::default(),
         params: Params {
             temperature: 0.0,
             top_p: 1.0,
             max_tokens: 64,
-            seed: None,
             reasoning: Reasoning::Off,
-            top_k: 0,
-            min_p: 0.0,
-            repeat_penalty: 0.0,
-            stop: vec![],
-            grammar: None,
-            raw: false,
+            ..Default::default()
         },
         flags: Config::default(),
-        config: RwLock::default(),
-        auto_name: "test".into(),
-        stopping: tokio::sync::watch::Sender::new(false),
-    };
+        saved: Config::default(),
+        http,
+    })
+    .unwrap();
     Arc::new(AppState { lair: Arc::new(lair), token: token.map(str::to_owned), addr: "127.0.0.1:0".into() })
 }
 
@@ -108,6 +101,20 @@ async fn the_apis_ask_for_the_token_and_answer_unknown_things_with_404() {
 }
 
 #[tokio::test]
+async fn every_api_words_its_errors_its_own_way_even_before_its_handlers() {
+    let s = state(Some("secret"));
+    let (_, ollama) = call(&s, "GET", "/api/tags", None, None).await;
+    assert!(ollama["error"].is_string(), "Ollama clients read a plain message: {ollama}");
+    let (_, anthropic) = call(&s, "POST", "/v1/messages", None, Some(json!({}))).await;
+    assert_eq!(anthropic["error"]["type"], "authentication_error", "{anthropic}");
+    let (_, openai) = call(&s, "GET", "/v1/models", None, None).await;
+    assert!(openai["error"]["message"].is_string(), "{openai}");
+    let open = state(None);
+    let (status, missing) = call(&open, "GET", "/api/nothing", None, None).await;
+    assert!(status == StatusCode::NOT_FOUND && missing["error"].is_string(), "{missing}");
+}
+
+#[tokio::test]
 async fn bad_requests_are_refused_before_anything_runs() {
     let s = state(None);
     let ask = |extra: Value| {
@@ -122,6 +129,9 @@ async fn bad_requests_are_refused_before_anything_runs() {
     assert!(status == StatusCode::BAD_REQUEST && e["error"]["message"].as_str().unwrap().contains("yaml"), "{e}");
     let empty = json!({ "messages": [] });
     assert_eq!(call(&s, "POST", "/v1/chat/completions", None, Some(empty)).await.0, StatusCode::BAD_REQUEST);
+    let (status, e) = call(&s, "POST", "/v1/messages", None, Some(ask(json!({ "model": "nope" })))).await;
+    assert!(status == StatusCode::NOT_FOUND && e["type"] == "error", "{e}");
+    assert_eq!(call(&s, "POST", "/v1/messages", None, Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
 
     // Pulling takes Hugging Face repos only: a URL or an Ollama library name never reaches the network.
     for name in ["https://evil.example/m.gguf", "llama3"] {

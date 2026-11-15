@@ -10,13 +10,14 @@ const T = pick({
 
 const STATUS: Record<ToolStep["status"], string> = T;
 
-/** The server names tools in English; Portuguese UIs show these instead. */
+/** The server names tools in English; Portuguese UIs show these instead. One per tool in src/agent/tools.rs;
+ *  a tool missing here shows the server's label. */
 const LABEL = pick<Record<string, string>>({
   en: {},
   pt: {
     list_dir: "Listar pasta", read_file: "Ler arquivo", write_file: "Escrever arquivo", edit_file: "Editar arquivo",
     delete_file: "Apagar arquivo", run_command: "Rodar comando", web_search: "Buscar na web", fetch_url: "Abrir página",
-    search_conversations: "Buscar conversas", read_conversation: "Ler conversa", list_skills: "Listar skills", save_skill: "Salvar skill",
+    search_conversations: "Buscar conversas", search_memory: "Buscar na memória", read_conversation: "Ler conversa", list_skills: "Listar skills", save_skill: "Salvar skill",
   },
 });
 
@@ -91,7 +92,7 @@ function SearchResults({ results }: { results: Source[] }) {
 /** `fetch_url` output starts with `Title: …` when the page had one. */
 function readPage(output?: string) {
   if (!output) return null;
-  const m = output.match(/^(?:Title|Título): (.*)\n\n/);
+  const m = output.match(/^Title: (.*)\n\n/);
   return { title: m?.[1] ?? null, text: m ? output.slice(m[0].length) : output };
 }
 

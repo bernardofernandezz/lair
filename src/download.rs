@@ -12,8 +12,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::engine::{shard_name, shard_of};
-use crate::hub::{self, Remote};
+use crate::gguf;
+use crate::hub;
 use crate::lair::Lair;
 
 /// A download's progress, as the UI polls it.
@@ -28,6 +28,12 @@ pub struct Progress {
     pub verifying: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl Progress {
+    fn running(&self) -> bool {
+        !self.finished && self.error.is_none()
+    }
 }
 
 struct Entry {
@@ -86,22 +92,23 @@ impl Downloads {
     }
 }
 
-/// Starts downloading `file` from `repo`, with the smallest projector if the repo has one. The file
-/// must be one the repo lists; the URL is built here, never taken from the client.
+/// Starts downloading `file` from `repo`, with the smallest projector if the repo has one; one already
+/// running is left to go on. The file must be one the repo lists; the URL is built here, never taken
+/// from the client.
 pub async fn start(lair: Arc<Lair>, repo: String, file: String) -> Result<()> {
-    let dir = lair.models.dir().context("no writable models folder")?.join(hub::folder(&repo));
+    let models = lair.models.dir().context("no writable models folder")?;
     let token = lair.config().hf_token;
     let listed = hub::group(hub::tree(&lair.http, &repo, token.as_deref()).await?);
     if !listed.iter().any(|l| l.name == file) {
         bail!("{file} is not in {repo}");
     }
-    let queue: Vec<Remote> = hub::with_projector(&listed, &file, &dir).into_iter().flat_map(|l| l.parts).collect();
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let hub::Plan { dir, files: queue, .. } = hub::Plan::new(&repo, &listed, &file, models);
+    let dir = crate::util::ensure_dir(dir)?;
     let key = key(&repo, &file);
     // One lock from the check to the abort handle: a cancel can never miss a download that started.
     let mut list = lair.downloads.list.lock().unwrap();
-    if list.get(&key).is_some_and(|e| !e.progress.finished && e.progress.error.is_none()) {
-        bail!("{file} is already downloading");
+    if list.get(&key).is_some_and(|e| e.progress.running()) {
+        return Ok(());
     }
     let progress = Progress {
         repo: repo.clone(),
@@ -262,11 +269,7 @@ pub fn remove(models: &Path, path: &Path) -> Result<u64> {
     if !path.starts_with(&root) || !path.is_file() {
         bail!("{} is not in lair's models folder; delete it yourself", path.display());
     }
-    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let files: Vec<PathBuf> = match shard_of(&name) {
-        Some((base, _, total)) => (1..=total).map(|i| path.with_file_name(shard_name(base, i, total))).collect(),
-        None => vec![path.clone()],
-    };
+    let files = gguf::parts(&path);
     let mut freed = 0;
     for f in files.iter().filter(|f| f.exists()) {
         freed += f.metadata().map_or(0, |m| m.len());
@@ -277,7 +280,7 @@ pub fn remove(models: &Path, path: &Path) -> Result<u64> {
         let left: Vec<PathBuf> = std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         let is_model = |p: &PathBuf| {
             let n = p.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
-            n.ends_with(".gguf") && !n.contains("mmproj")
+            n.ends_with(".gguf") && !gguf::is_mmproj(&n)
         };
         if !left.iter().any(is_model) {
             for f in left.iter().filter(|f| f.is_file()) {
@@ -289,6 +292,143 @@ pub fn remove(models: &Path, path: &Path) -> Result<u64> {
         }
     }
     Ok(freed)
+}
+
+/// The terminal's side of downloading: what `lair pull`, `lair rm` and a first run do, reported as they go.
+pub mod cli {
+    use super::*;
+    use crate::{models, net, ollama_store};
+
+    /// A first run never downloads more than this without being asked to: bigger models are a choice.
+    const FIRST_RUN_MAX: u64 = 6_000_000_000;
+    /// How long a first run waits for Hugging Face before settling for the default model.
+    const FIRST_RUN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// Prints a download's progress every 5%.
+    fn progress() -> impl FnMut(u64, u64) {
+        let mut shown = 0;
+        move |done, total| {
+            if total > 0 && done * 20 / total > shown {
+                shown = done * 20 / total;
+                eprintln!("  {}% of {} MB", shown * 5, total / 1_000_000);
+            }
+        }
+    }
+
+    async fn url(url: &str, dir: &Path, token: Option<&str>) -> Result<()> {
+        eprintln!("downloading {url}");
+        let dest = download(url, dir, token, progress()).await?;
+        eprintln!("saved {}", dest.display());
+        Ok(())
+    }
+
+    async fn plan(plan: &hub::Plan, token: Option<&str>) -> Result<()> {
+        crate::util::ensure_dir(plan.dir.clone())?;
+        let http = net::download_client();
+        for f in &plan.files {
+            let (url, dest) = (hub::file_url(&plan.repo, &f.path), plan.dir.join(f.name()));
+            eprintln!("downloading {url}");
+            fetch(&http, &url, &dest, f.sha256.as_deref(), token, progress()).await?;
+            eprintln!("saved {}", dest.display());
+        }
+        Ok(())
+    }
+
+    /// `lair pull`: a .gguf URL downloads as is; anything else names a Hugging Face repo (see [`hub::plan`]), and
+    /// the file that fits this machine best (or the quant asked for) comes down with its vision projector.
+    pub async fn pull(spec: &str, models: &Path, token: Option<&str>) -> Result<()> {
+        // A link downloads as is, unless it is a Hugging Face repo's page: then it names that repo.
+        let is_file = spec.split(['?', '#']).next().is_some_and(|p| p.ends_with(".gguf"));
+        let is_link = spec.starts_with("http://") || spec.starts_with("https://");
+        if is_link && (is_file || !hub::is_hf(spec)) {
+            return url(spec, models, token).await;
+        }
+        let p = hub::plan(&net::client(), spec, models, token).await?;
+        eprintln!("using {}", p.repo);
+        plan(&p, token).await
+    }
+
+    /// First run with no model anywhere in `dirs`: download one so lair starts with something to chat
+    /// with. `wanted` is a URL, [`models::AUTO`] for the best for this machine, or "" for none.
+    pub async fn first_run(dirs: &[PathBuf], wanted: &str, token: Option<&str>) -> Result<()> {
+        let mut found = Vec::new();
+        for p in dirs {
+            if let Err(e) = gguf::collect_gguf(p, &mut found) {
+                eprintln!("reading {}: {e}", p.display());
+            }
+            found.extend(ollama_store::models(p).into_iter().map(|(_, blob)| blob));
+        }
+        if !found.is_empty() || wanted.is_empty() {
+            return Ok(());
+        }
+        let dir =
+            dirs.iter().find(|p| p.is_dir()).context("no .gguf found and no models folder to download one into")?;
+        if wanted != models::AUTO {
+            eprintln!("no models in {}; downloading the default one", dir.display());
+            return url(wanted, dir, token).await;
+        }
+        eprintln!("no models in {}; asking Hugging Face for the best one for this machine", dir.display());
+        let http = net::client();
+        let why =
+            match tokio::time::timeout(FIRST_RUN_PATIENCE, hub::first_model(&http, token, FIRST_RUN_MAX, dir)).await {
+                Ok(Ok((p, why))) => {
+                    eprintln!("picked {} ({})", p.repo, why.join(", "));
+                    return plan(&p, token).await;
+                }
+                Ok(Err(e)) => format!("couldn't choose ({e:#})"),
+                Err(_) => "Hugging Face took too long".to_owned(),
+            };
+        eprintln!("{why}; downloading the default model instead");
+        url(&hub::default_model_url(), dir, token).await
+    }
+
+    /// `lair list`: the models in `dir`, with their sizes.
+    pub fn list(dir: &Path) -> Result<()> {
+        let mut found = Vec::new();
+        gguf::collect_gguf(dir, &mut found)?;
+        found.sort();
+        for path in &found {
+            let size = std::fs::metadata(path).map_or(0, |m| m.len());
+            println!("{:<48} {:>6.1} GB", path.strip_prefix(dir).unwrap_or(path).display(), size as f64 / 1e9);
+        }
+        if found.is_empty() {
+            eprintln!(
+                "no models in {}; `lair pull <repo>` downloads one, or `lair serve` fetches the best for this machine",
+                dir.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// `lair rm`: deletes the one model in `dir` that `name` names, exactly or as part of its id.
+    pub fn rm(name: &str, dir: &Path) -> Result<()> {
+        let mut found = Vec::new();
+        gguf::collect_gguf(dir, &mut found)?;
+        // Projectors go with their model.
+        let models: Vec<(String, PathBuf)> = found
+            .into_iter()
+            .filter_map(|p| {
+                let file = p.file_name()?.to_string_lossy().into_owned();
+                let id = gguf::model_id(&file)?.to_owned();
+                (!gguf::is_mmproj(&file)).then_some((id, p))
+            })
+            .collect();
+        let exact: Vec<_> = models.iter().filter(|(id, _)| id == name).collect();
+        let matches =
+            if exact.is_empty() { models.iter().filter(|(id, _)| id.contains(name)).collect() } else { exact };
+        match matches.as_slice() {
+            [(id, path)] => {
+                let freed = remove(dir, path)?;
+                println!("deleted {id} ({:.1} GB freed)", freed as f64 / 1e9);
+                Ok(())
+            }
+            [] => bail!("no model matching {name:?} in {}; see `lair list`", dir.display()),
+            many => {
+                let names: Vec<&str> = many.iter().map(|(id, _)| id.as_str()).collect();
+                bail!("{name:?} matches several models, name one: {}", names.join(", "))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

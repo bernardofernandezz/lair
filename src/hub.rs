@@ -10,17 +10,24 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::engine::shard_of;
+use crate::gguf::{self, shard_of};
 use crate::hw::{Hardware, hardware};
 use crate::lair::Lair;
 
 const HF: &str = "https://huggingface.co";
 
+/// What a first run downloads when Hugging Face can't be asked for something better.
+const DEFAULT_REPO: &str = "Qwen/Qwen3-4B-GGUF";
+
+pub fn default_model_url() -> String {
+    file_url(DEFAULT_REPO, "Qwen3-4B-Q4_K_M.gguf")
+}
+
 /// Open GGUF repos lair vouches for, smallest first: shown when Hugging Face's listing can't be
 /// reached, and always among the candidates for the recommendation.
 pub const SUGGESTED: &[(&str, &str)] = &[
     ("bartowski/Llama-3.2-3B-Instruct-GGUF", "Small and fast; good for modest machines."),
-    ("Qwen/Qwen3-4B-GGUF", "Reasons; lair's default."),
+    (DEFAULT_REPO, "Reasons; lair's default."),
     ("ggml-org/gemma-3-4b-it-GGUF", "Sees images; light."),
     ("ggml-org/Qwen2.5-VL-7B-Instruct-GGUF", "Sees images; reads documents and screens well."),
     ("Qwen/Qwen3-8B-GGUF", "Reasons; a good balance for daily use."),
@@ -221,9 +228,55 @@ pub fn group(remotes: Vec<Remote>) -> Vec<Listed> {
     out
 }
 
-/// The id a downloaded file gets in the catalog: its name without `.gguf`, or a split model's base name.
-fn model_id(name: &str) -> &str {
-    shard_of(name).map_or_else(|| name.trim_end_matches(".gguf"), |(base, _, _)| base)
+/// Names from Ollama's library and the Hugging Face repo each one means here: a fixed list of known
+/// publishers, never a search, so a name can't be squatted into choosing what gets downloaded.
+/// A name without a tag is Ollama's default size.
+const OLLAMA_LIBRARY: &[(&str, &str)] = &[
+    ("qwen3:0.6b", "Qwen/Qwen3-0.6B-GGUF"),
+    ("qwen3:1.7b", "Qwen/Qwen3-1.7B-GGUF"),
+    ("qwen3:4b", "Qwen/Qwen3-4B-GGUF"),
+    ("qwen3", "Qwen/Qwen3-8B-GGUF"),
+    ("qwen3:8b", "Qwen/Qwen3-8B-GGUF"),
+    ("qwen3:14b", "Qwen/Qwen3-14B-GGUF"),
+    ("qwen3:30b", "Qwen/Qwen3-30B-A3B-GGUF"),
+    ("qwen3:32b", "Qwen/Qwen3-32B-GGUF"),
+    ("qwen2.5-coder:1.5b", "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF"),
+    ("qwen2.5-coder", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"),
+    ("qwen2.5-coder:7b", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"),
+    ("qwen2.5-coder:14b", "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF"),
+    ("qwen2.5-coder:32b", "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF"),
+    ("qwen2.5vl", "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF"),
+    ("qwen2.5vl:7b", "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF"),
+    ("llama3.2:1b", "bartowski/Llama-3.2-1B-Instruct-GGUF"),
+    ("llama3.2", "bartowski/Llama-3.2-3B-Instruct-GGUF"),
+    ("llama3.2:3b", "bartowski/Llama-3.2-3B-Instruct-GGUF"),
+    ("llama3.1", "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"),
+    ("llama3.1:8b", "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"),
+    ("gemma3:1b", "ggml-org/gemma-3-1b-it-GGUF"),
+    ("gemma3", "ggml-org/gemma-3-4b-it-GGUF"),
+    ("gemma3:4b", "ggml-org/gemma-3-4b-it-GGUF"),
+    ("gemma3:12b", "ggml-org/gemma-3-12b-it-GGUF"),
+    ("gemma3:27b", "ggml-org/gemma-3-27b-it-GGUF"),
+    ("mistral", "bartowski/Mistral-7B-Instruct-v0.3-GGUF"),
+    ("mistral:7b", "bartowski/Mistral-7B-Instruct-v0.3-GGUF"),
+    ("phi4", "bartowski/phi-4-GGUF"),
+    ("phi4:14b", "bartowski/phi-4-GGUF"),
+    ("deepseek-r1:1.5b", "bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF"),
+    ("deepseek-r1:7b", "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"),
+    ("deepseek-r1:14b", "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF"),
+    ("deepseek-r1:32b", "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF"),
+    ("gpt-oss", "ggml-org/gpt-oss-20b-GGUF"),
+    ("gpt-oss:20b", "ggml-org/gpt-oss-20b-GGUF"),
+    ("gpt-oss:120b", "ggml-org/gpt-oss-120b-GGUF"),
+    ("nomic-embed-text", "nomic-ai/nomic-embed-text-v1.5-GGUF"),
+    ("bge-m3", crate::memory::EMBED_REPO),
+];
+
+/// The repo an Ollama library name (`qwen3`, `llama3.2:3b`, `gemma3:latest`) stands for, if lair knows it.
+pub fn ollama_repo(name: &str) -> Option<&'static str> {
+    let name = name.trim().to_ascii_lowercase();
+    let name = name.strip_suffix(":latest").unwrap_or(&name);
+    OLLAMA_LIBRARY.iter().find(|(n, _)| *n == name).map(|(_, repo)| *repo)
 }
 
 /// `owner/name`, each part starting with a letter or digit: never a path that climbs out.
@@ -314,11 +367,11 @@ fn judge(
     listed
         .iter()
         .map(|l| {
-            let mmproj = l.name.to_ascii_lowercase().contains("mmproj");
+            let mmproj = gguf::is_mmproj(&l.name);
             let installed = if mmproj {
                 dir.is_some_and(|d| d.join(&l.name).exists())
             } else {
-                have.iter().any(|id| id == model_id(&l.name))
+                have.iter().any(|id| Some(id.as_str()) == gguf::model_id(&l.name))
             };
             File {
                 fit: fit(l.size, hw),
@@ -352,17 +405,50 @@ pub async fn choose(lair: &Lair, repo: &str, quant: Option<&str>) -> Result<Stri
     pick_file(&files, quant.as_deref(), &hardware()).map_err(|e| anyhow::anyhow!("{repo}: {e}"))
 }
 
-/// `file`, plus the repo's smallest vision projector when it has one that isn't in `dir` yet.
-pub fn with_projector(listed: &[Listed], file: &str, dir: &Path) -> Vec<Listed> {
-    let is_proj = |l: &&Listed| l.name.to_ascii_lowercase().contains("mmproj");
-    let mut queue: Vec<Listed> = listed.iter().filter(|l| l.name == file).cloned().collect();
-    if !file.to_ascii_lowercase().contains("mmproj")
-        && let Some(proj) = listed.iter().filter(is_proj).min_by_key(|l| l.size)
-        && !dir.join(&proj.name).exists()
-    {
-        queue.push(proj.clone());
+/// What to download for one model: every part of `file`, then the repo's smallest vision projector when
+/// it has one that isn't there yet. Each repo gets its own folder under `models`.
+pub struct Plan {
+    pub repo: String,
+    pub dir: PathBuf,
+    pub files: Vec<Remote>,
+}
+
+impl Plan {
+    pub fn new(repo: &str, listed: &[Listed], file: &str, models: &Path) -> Self {
+        let dir = models.join(folder(repo));
+        let is_proj = |l: &&Listed| gguf::is_mmproj(&l.name);
+        let mut queue: Vec<&Listed> = listed.iter().filter(|l| l.name == file).collect();
+        if !gguf::is_mmproj(file)
+            && let Some(proj) = listed.iter().filter(is_proj).min_by_key(|l| l.size)
+            && !dir.join(&proj.name).exists()
+        {
+            queue.push(proj);
+        }
+        let files = queue.into_iter().flat_map(|l| l.parts.clone()).collect();
+        Self { repo: repo.to_owned(), dir, files }
     }
-    queue
+}
+
+/// What a pull names: `owner/repo`, `owner/repo:QUANT`, either behind a Hugging Face URL or Ollama's
+/// `hf.co/` prefix, or a name from Ollama's library ([`ollama_repo`]). Anything else is a bare name.
+pub struct Wanted {
+    /// `owner/repo`, unless the spec was a bare name.
+    pub name: String,
+    pub quant: Option<String>,
+}
+
+pub fn wanted(spec: &str) -> Wanted {
+    let spec = spec.trim();
+    if let Some(repo) = ollama_repo(spec) {
+        return Wanted { name: repo.to_owned(), quant: None };
+    }
+    let spec = ["https://huggingface.co/", "huggingface.co/", "hf.co/"]
+        .iter()
+        .find_map(|p| spec.strip_prefix(p))
+        .unwrap_or(spec);
+    let (name, quant) = spec.split_once(':').unwrap_or((spec, ""));
+    let quant = Some(quant.to_ascii_uppercase()).filter(|q| !q.is_empty() && q != "LATEST");
+    Wanted { name: name.to_owned(), quant }
 }
 
 /// Where a repo's file downloads from.
@@ -375,32 +461,21 @@ pub fn is_hf(url: &str) -> bool {
     url.starts_with(&format!("{HF}/"))
 }
 
-/// What `lair pull <spec>` downloads: `owner/repo`, `owner/repo:QUANT` or just `repo` (searched).
-/// Returns the repo, its folder under `models` and the files to fetch, model first.
-pub async fn plan(
-    http: &reqwest::Client,
-    spec: &str,
-    models: &Path,
-    token: Option<&str>,
-) -> Result<(String, PathBuf, Vec<Remote>)> {
-    let (name, quant) = match spec.rsplit_once(':') {
-        Some((n, q)) => (n, Some(q.to_ascii_uppercase())),
-        None => (spec, None),
-    };
+/// What `lair pull <spec>` downloads (see [`wanted`]); a bare name is searched for on Hugging Face.
+pub async fn plan(http: &reqwest::Client, spec: &str, models: &Path, token: Option<&str>) -> Result<Plan> {
+    let Wanted { name, quant } = wanted(spec);
     let repo = if name.contains('/') {
-        name.to_owned()
+        name
     } else {
-        let found = search(http, name).await?;
-        let pick = found.iter().find(|r| r.id.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name)));
+        let found = search(http, &name).await?;
+        let pick = found.iter().find(|r| r.id.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(&name)));
         pick.or(found.first()).with_context(|| format!("no GGUF repo on Hugging Face matches {name:?}"))?.id.clone()
     };
     let listed = group(tree(http, &repo, token).await?);
     let hw = hardware();
     let judged = judge(&listed, &hw, &[], None, |_| None);
     let file = pick_file(&judged, quant.as_deref(), &hw).map_err(|e| anyhow::anyhow!("{repo}: {e}"))?;
-    let dir = models.join(folder(&repo));
-    let queue = with_projector(&listed, &file, &dir).into_iter().flat_map(|l| l.parts).collect();
-    Ok((repo, dir, queue))
+    Ok(Plan::new(&repo, &listed, &file, models))
 }
 
 /// The file a quant names, or the recommended one for this machine.
@@ -410,7 +485,7 @@ fn pick_file(files: &[File], quant: Option<&str>, hw: &Hardware) -> Result<Strin
         Some(q) => {
             // `Q4_0` must pick `m-Q4_0.gguf` over `m-Q4_0_4_4.gguf`: an exact ending beats a substring.
             // A split model's name ends with its part number, so the quant is looked for in its id.
-            let upper = |f: &&File| model_id(&f.name).to_ascii_uppercase();
+            let upper = |f: &&File| gguf::model_id(&f.name).unwrap_or(&f.name).to_ascii_uppercase();
             let exact = models().find(|f| upper(f).ends_with(q));
             exact.or_else(|| models().find(|f| upper(f).contains(q))).map(|f| f.name.clone()).ok_or_else(|| {
                 let names: Vec<&str> = models().map(|f| f.name.as_str()).collect();
@@ -466,7 +541,7 @@ impl Candidate {
 
     fn thinks(&self) -> bool {
         let template = self.gguf.as_ref().and_then(|g| g.chat_template.as_deref()).unwrap_or("");
-        template.contains("<think>") || template.contains("enable_thinking")
+        template.contains(crate::engine::OPEN) || template.contains("enable_thinking")
     }
 
     fn owner(&self) -> &str {
@@ -674,13 +749,13 @@ pub async fn suggested(lair: &Lair) -> Vec<Pick> {
 }
 
 /// The model a first run downloads into `models`: the best for this machine no bigger than `max`
-/// bytes, with the files to fetch (model first, then its projector) and the reasons, to tell the user.
+/// bytes, and the reasons, to tell the user.
 pub async fn first_model(
     http: &reqwest::Client,
     token: Option<&str>,
     max: u64,
     models: &Path,
-) -> Result<(String, Vec<Remote>, Vec<&'static str>)> {
+) -> Result<(Plan, Vec<&'static str>)> {
     let hw = hardware();
     let found = surveyed(http, token, None).await;
     let lists: HashMap<String, Vec<Listed>> = found.iter().map(|(c, l)| (c.id.clone(), l.clone())).collect();
@@ -693,9 +768,7 @@ pub async fn first_model(
         .collect();
     let best = rank(judged, &hw, token.is_some()).into_iter().find(|p| p.best).context("nothing suitable found")?;
     let file = best.pick.context("the best pick has a file")?;
-    let dir = models.join(folder(&best.repo));
-    let queue = with_projector(&lists[&best.repo], &file.name, &dir).into_iter().flat_map(|l| l.parts);
-    Ok((best.repo, queue.collect(), best.why))
+    Ok((Plan::new(&best.repo, &lists[&best.repo], &file.name, models), best.why))
 }
 
 #[cfg(test)]
@@ -712,7 +785,7 @@ mod tests {
         File {
             name: name.into(),
             size,
-            mmproj: name.contains("mmproj"),
+            mmproj: gguf::is_mmproj(name),
             fit: fit(size, hw),
             installed: false,
             parts: 1,
@@ -765,6 +838,10 @@ mod tests {
     #[test]
     fn names_from_the_network_cannot_climb_out_of_the_models_folder() {
         assert!(check_repo("Qwen/Qwen3-8B-GGUF").is_ok());
+        assert_eq!(ollama_repo("Qwen3:Latest"), Some("Qwen/Qwen3-8B-GGUF"));
+        assert_eq!(ollama_repo("llama3.2:1b"), Some("bartowski/Llama-3.2-1B-Instruct-GGUF"));
+        assert_eq!(ollama_repo("llama3"), None);
+        assert!(OLLAMA_LIBRARY.iter().all(|(_, repo)| check_repo(repo).is_ok()));
         assert!(check_repo("bartowski/Llama-3.2-3B-Instruct-GGUF").is_ok());
         for bad in ["..", "../x", "a/..", "a/b/c", "a", "/etc", "a/.hidden", "a/b c", "a/"] {
             assert!(check_repo(bad).is_err(), "{bad}");
@@ -814,9 +891,11 @@ mod tests {
     #[test]
     fn a_vision_model_brings_its_projector() {
         let listed = group(vec![remote("m.gguf", 9), remote("mmproj-f16.gguf", 2), remote("mmproj-f32.gguf", 4)]);
-        let dir = std::env::temp_dir().join("lair-no-such-dir");
-        let names: Vec<String> = with_projector(&listed, "m.gguf", &dir).into_iter().map(|l| l.name).collect();
+        let models = std::env::temp_dir().join("lair-no-such-dir");
+        let plan = Plan::new("o/r", &listed, "m.gguf", &models);
+        let names: Vec<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(names, ["m.gguf", "mmproj-f16.gguf"]);
+        assert_eq!(plan.dir, models.join("o__r"));
     }
 
     #[test]
@@ -832,7 +911,6 @@ mod tests {
         let names: Vec<(&str, u64, usize)> = listed.iter().map(|l| (l.name.as_str(), l.size, l.parts.len())).collect();
         assert_eq!(names, [("big-Q4-00001-of-00003.gguf", 12, 3), ("small.gguf", 3, 1)], "an incomplete set is hidden");
         assert_eq!(listed[0].parts[1].path, "Q4/big-Q4-00002-of-00003.gguf");
-        assert_eq!((model_id("big-Q4-00001-of-00003.gguf"), model_id("small.gguf")), ("big-Q4", "small"));
         let hw = machine(0, 64 * GB);
         let files = judge(&listed, &hw, &["big-Q4".into()], None, |size| Some(size as f32));
         assert!(files[0].installed && files[0].parts == 3 && !files[1].installed);

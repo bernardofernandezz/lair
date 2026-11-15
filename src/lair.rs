@@ -9,10 +9,12 @@ use serde_json::Value;
 use crate::agent::Approvals;
 use crate::assets::Assets;
 use crate::config::Config;
-use crate::engine::Params;
+use crate::engine::Engine;
+use crate::generation::Params;
 use crate::models::Models;
 use crate::peers::Peers;
 use crate::skills::Catalog;
+use crate::speed::Bench;
 use crate::store::Store;
 
 pub struct Lair {
@@ -33,26 +35,72 @@ pub struct Lair {
     pub hub: crate::hub::Cache,
     /// Wakes the indexer that keeps conversations and workspace files searchable by meaning.
     pub memory: crate::memory::Memory,
-    /// Generation params from the command line; reasoning comes from [`Config`].
-    pub params: Params,
-    /// What the command line set; these settings can't be changed from the UI.
-    pub flags: Config,
-    /// The live settings: `flags` over what the UI saved. Changed only through [`Lair::save`].
-    pub config: RwLock<Config>,
-    /// This node's name when no setting names it: its Tailscale host name, else the host name.
-    pub auto_name: String,
     /// Flips to `true` when the server is shutting down, so running turns save what they have and end.
     pub stopping: tokio::sync::watch::Sender<bool>,
+    /// Generation params from the command line; reasoning comes from [`Config`].
+    params: Params,
+    /// What the command line set; these settings can't be changed from the UI.
+    flags: Config,
+    /// The live settings: `flags` over what the UI saved.
+    config: RwLock<Config>,
+    /// This node's name when no setting names it.
+    auto_name: String,
+}
+
+/// What a node is made of; everything else in [`Lair`] starts empty.
+pub struct Parts {
+    pub engine: Arc<Engine>,
+    pub peers: Peers,
+    pub auto_name: String,
+    pub store: Store,
+    pub skills: Catalog,
+    pub assets: Assets,
+    pub workspace: PathBuf,
+    /// Generation params from the command line.
+    pub params: Params,
+    /// Settings from the command line.
+    pub flags: Config,
+    /// What the UI saved ([`Config::saved`]).
+    pub saved: Config,
+    pub http: reqwest::Client,
 }
 
 impl Lair {
+    pub fn new(p: Parts) -> Result<Self> {
+        let peers = Arc::new(p.peers);
+        let config = p.flags.over(&p.saved);
+        Ok(Self {
+            models: Models::new(p.engine, peers.clone(), Bench::load(&p.store)?),
+            peers,
+            skills: RwLock::new(p.skills),
+            http: p.http,
+            assets: p.assets,
+            workspace: p.workspace,
+            approvals: Approvals::default(),
+            downloads: Default::default(),
+            hub: Default::default(),
+            memory: Default::default(),
+            stopping: tokio::sync::watch::Sender::new(false),
+            params: p.params,
+            flags: p.flags,
+            config: RwLock::new(config),
+            auto_name: p.auto_name,
+            store: p.store,
+        })
+    }
+
     pub fn config(&self) -> Config {
         self.config.read().unwrap().clone()
     }
 
+    /// What the command line set, which the UI can't change.
+    pub fn flags(&self) -> &Config {
+        &self.flags
+    }
+
     /// Changes what the UI saved (see [`Config::patched`]); takes effect at once, under the flags.
     pub fn save(&self, change: Value) -> Result<()> {
-        let saved = saved(&self.store).patched(change)?;
+        let saved = Config::saved(&self.store).patched(change)?;
         self.store.save_config(&serde_json::to_value(&saved)?)?;
         *self.config.write().unwrap() = self.flags.over(&saved);
         Ok(())
@@ -63,19 +111,12 @@ impl Lair {
         Params { reasoning: self.config.read().unwrap().reasoning.unwrap_or_default(), ..self.params.clone() }
     }
 
+    /// This node's name when no setting names it: its Tailscale host name, else the host name.
+    pub fn auto_name(&self) -> &str {
+        &self.auto_name
+    }
+
     pub fn node_name(&self) -> String {
         self.config.read().unwrap().name.clone().unwrap_or_else(|| self.auto_name.clone())
-    }
-}
-
-/// What the UI saved. A document lair can't read any more (an old field, a broken row) is set aside
-/// with a warning, and the next save replaces it.
-pub fn saved(store: &Store) -> Config {
-    match store.config().and_then(|v| Ok(serde_json::from_value(v)?)) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("warning: ignoring the saved settings: {e:#}");
-            Config::default()
-        }
     }
 }

@@ -22,8 +22,8 @@ async fn read(State(s): S) -> ApiResult<Json<Value>> {
     let peers = &lair.peers;
     let config = lair.config();
     Ok(Json(json!({
-        "saved": crate::lair::saved(&lair.store).redacted(),
-        "flags": lair.flags.redacted(),
+        "saved": crate::config::Config::saved(&lair.store).redacted(),
+        "flags": lair.flags().redacted(),
         "tailscale": { "socket": peers.has_socket(), "status": peers.status().await },
         "discovered": peers.found(),
         "system": {
@@ -31,7 +31,7 @@ async fn read(State(s): S) -> ApiResult<Json<Value>> {
             "token": s.token.is_some(),
             "addr": s.addr,
             "name": lair.node_name(),
-            "autoName": lair.auto_name,
+            "autoName": lair.auto_name(),
             "reasoning": lair.params().reasoning,
             "trustTailnet": config.trust_tailnet(),
             "workspace": lair.workspace.display().to_string(),
