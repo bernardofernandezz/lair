@@ -160,6 +160,7 @@ Switch on **Agent** in the composer and the model can act instead of only writin
 | `web_search`, `fetch_url` | Search through your SearXNG, read a page | ✓ |
 | `search_conversations`, `read_conversation` | Look through saved conversations | |
 | `search_memory` | Find passages of past chats and workspace files by meaning | |
+| `update_plan` | Write down the steps of a longer task and tick them off | |
 
 Before a tool changes something or goes online, lair shows the exact arguments and waits for you to allow it once, allow it for the rest of the conversation, or deny it. File paths can't leave the workspace (`<data>/workspace` by default).
 

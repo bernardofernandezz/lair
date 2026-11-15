@@ -17,7 +17,7 @@ const LABEL = pick<Record<string, string>>({
   pt: {
     list_dir: "Listar pasta", read_file: "Ler arquivo", write_file: "Escrever arquivo", edit_file: "Editar arquivo",
     delete_file: "Apagar arquivo", run_command: "Rodar comando", web_search: "Buscar na web", fetch_url: "Abrir página",
-    search_conversations: "Buscar conversas", search_memory: "Buscar na memória", read_conversation: "Ler conversa", list_skills: "Listar skills", save_skill: "Salvar skill",
+    search_conversations: "Buscar conversas", search_memory: "Buscar na memória", read_conversation: "Ler conversa", list_skills: "Listar skills", save_skill: "Salvar skill", update_plan: "Plano",
   },
 });
 
