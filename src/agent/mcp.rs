@@ -3,9 +3,10 @@
 //! ask before running: they are someone else's code.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -49,6 +50,30 @@ struct Io {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next: u64,
+}
+
+/// The servers of one `mcp.json`, started again when the file changes: an edit applies from the next
+/// agent turn, without restarting lair. The servers it replaces stop once no turn uses them.
+#[derive(Default)]
+pub struct Live {
+    path: Option<PathBuf>,
+    current: Mutex<(Option<SystemTime>, Arc<Mcp>)>,
+}
+
+impl Live {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path: Some(path), current: Default::default() }
+    }
+
+    pub async fn get(&self) -> Arc<Mcp> {
+        let Some(path) = &self.path else { return Arc::default() };
+        let changed = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let mut current = self.current.lock().await;
+        if current.0 != changed {
+            *current = (changed, Arc::new(Mcp::start(path).await));
+        }
+        current.1.clone()
+    }
 }
 
 #[derive(Default)]
@@ -138,21 +163,25 @@ impl Server {
         });
         server.request("initialize", init).await?;
         server.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await?;
-        // shortcut: only the first page of tools/list; follow `nextCursor` if a server has hundreds.
-        let list = server.request("tools/list", json!({})).await?;
-        let tools = list["tools"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|t| {
+        let mut tools = Vec::new();
+        let mut cursor = Value::Null;
+        // A server that keeps handing out cursors is cut off rather than followed forever.
+        for _ in 0..100 {
+            let params = if cursor.is_null() { json!({}) } else { json!({ "cursor": cursor }) };
+            let page = server.request("tools/list", params).await?;
+            tools.extend(page["tools"].as_array().into_iter().flatten().filter_map(|t| {
                 let tool = t["name"].as_str()?;
                 let about = t["description"].as_str().unwrap_or("").lines().next().unwrap_or("");
                 Some(Tool {
                     name: format!("{PREFIX}{name}__{tool}"),
                     usage: format!("{about} Arguments: {}", t["inputSchema"]),
                 })
-            })
-            .collect();
+            }));
+            cursor = page["nextCursor"].clone();
+            if !cursor.is_string() {
+                break;
+            }
+        }
         Ok((server, tools))
     }
 
@@ -210,9 +239,10 @@ mod tests {
         while read -r line; do
           case "$line" in
             *'"initialize"'*) echo '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
-            *'"tools/list"'*) echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echoes.","inputSchema":{"type":"object"}}]}}' ;;
+            *'"cursor"'*) echo '{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"two"}]}}' ;;
+            *'"tools/list"'*) echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echoes.","inputSchema":{"type":"object"}}],"nextCursor":"p2"}}' ;;
             *'"tools/call"'*) echo '{"jsonrpc":"2.0","method":"roots/list","id":"r1"}'
-                              echo '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"hi"}]}}' ;;
+                              echo '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"hi"}]}}' ;;
           esac
         done"#;
 
@@ -223,11 +253,17 @@ mod tests {
         let path = dir.join("mcp.json");
         let config = json!({ "mcpServers": { "fake": { "command": "sh", "args": ["-c", FAKE] } } });
         std::fs::write(&path, config.to_string()).unwrap();
-        let mcp = Mcp::start(&path).await;
-        assert_eq!(mcp.tools().iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["mcp__fake__echo"]);
+        let live = Live::new(path.clone());
+        let mcp = live.get().await;
+        let names: Vec<&str> = mcp.tools().iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["mcp__fake__echo", "mcp__fake__two"], "every page");
+        assert!(Arc::ptr_eq(&mcp, &live.get().await), "same file, same servers");
         assert!(mcp.tools()[0].usage.starts_with("Echoes."));
         assert_eq!(mcp.call("mcp__fake__echo", &json!({})).await.unwrap(), "hi");
         assert!(mcp.call("mcp__other__echo", &json!({})).await.is_err());
         assert!(Mcp::start(&dir.join("none.json")).await.tools().is_empty(), "no file, no servers");
+        let later = std::fs::File::options().write(true).open(&path).unwrap();
+        later.set_modified(SystemTime::now() + Duration::from_secs(5)).unwrap();
+        assert!(!Arc::ptr_eq(&mcp, &live.get().await), "an edited file starts them again");
     }
 }

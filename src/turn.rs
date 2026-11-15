@@ -172,9 +172,10 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     // ~3 characters per token; half the context for history, half for the reply.
     trim(&mut history, lair.models.ctx(&model) as usize * 3 / 2);
     let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history);
+    let mcp = if c.agent { lair.mcp.get().await } else { Default::default() };
     if c.agent {
         let mut system = tools::system_prompt(&lair.config());
-        for t in lair.mcp.tools() {
+        for t in mcp.tools() {
             system.push_str(&format!("- {}: {}\n", t.name, t.usage));
         }
         prompt = with_system(&prompt, &system);
@@ -185,7 +186,7 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
 
     let mut params = lair.params();
     params.reasoning = c.effort.unwrap_or(params.reasoning);
-    let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model, agent: c.agent, sources: 0 };
+    let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model, agent: c.agent, sources: 0, mcp };
     let max_steps = lair.config().max_steps.unwrap_or(agent::MAX_STEPS);
     let budget = lair.models.ctx(&step.model) as usize * 3 / 2;
     for _ in 0..max_steps {
@@ -252,6 +253,8 @@ struct Step<'a> {
     agent: bool,
     /// Web results numbered so far, for citations.
     sources: usize,
+    /// MCP tools as they were when the turn started.
+    mcp: std::sync::Arc<crate::agent::mcp::Mcp>,
 }
 
 impl Step<'_> {
@@ -259,9 +262,7 @@ impl Step<'_> {
     async fn generate(&mut self, prompt: Vec<Msg>, params: Params) -> Result<Generated> {
         let mut rx = self.lair.models.generate(&self.model, prompt, params);
         let mut split = self.agent.then(|| {
-            CallSplit::new(
-                tools::SPECS.iter().map(|s| s.name).chain(self.lair.mcp.tools().iter().map(|t| t.name.as_str())),
-            )
+            CallSplit::new(tools::SPECS.iter().map(|s| s.name).chain(self.mcp.tools().iter().map(|t| t.name.as_str())))
         });
         let (mut text, mut reasoning) = (String::new(), String::new());
         let mut call = None;
@@ -341,7 +342,7 @@ impl Step<'_> {
             spec.and_then(|s| arguments.get(s.subject)).and_then(Value::as_str).unwrap_or_default().to_owned();
         // A tool the settings keep from working fails at once: nothing to approve.
         let ready = spec.map(|s| s.ready(&self.lair.config()));
-        let mcp = spec.is_none() && self.lair.mcp.has(&name);
+        let mcp = spec.is_none() && self.mcp.has(&name);
         let needs_approval = (mcp || spec.is_some_and(|s| s.needs_approval) && ready == Some(Ok(())))
             && !self.lair.approvals.allowed(self.conv, &name);
         let shown = Out::ToolCall {
@@ -377,7 +378,7 @@ impl Step<'_> {
                             Some(spec) => {
                                 spec.run(&mut Ctx { lair: self.lair, sources: &mut self.sources }, &arguments).await
                             }
-                            None => self.lair.mcp.call(&name, &arguments).await.map(tools::shorten),
+                            None => self.mcp.call(&name, &arguments).await.map(tools::shorten),
                         };
                         match ran {
                             Ok(text) => (ToolStatus::Ok, text),

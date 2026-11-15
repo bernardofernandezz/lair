@@ -347,8 +347,9 @@ async fn main() -> Result<()> {
                 flags,
                 saved,
                 http,
-                mcp: agent::mcp::Mcp::start(&data.join("mcp.json")).await,
+                mcp: agent::mcp::Live::new(data.join("mcp.json")),
             })?;
+            lair.mcp.get().await;
             server::run(lair, api_token, format!("{host}:{port}")).await
         }
     }
