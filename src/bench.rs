@@ -34,7 +34,8 @@ fn measure(engine: &Engine, id: &str, params: &Params, bench: &mut Bench, key: &
     eprintln!("measuring {id} {label}…");
     let done = engine.generate(id, &msgs, &p, |_| true)?;
     let l = engine.loaded().into_iter().find(|l| l.id == id).context("the model just ran")?;
-    bench.record(key, l.size, l.offload(), done.tps());
+    let reads = engine.info(id).map_or(l.size, |m| m.meta.read_per_token(l.size));
+    bench.record(key, reads, l.offload(), done.tps());
     println!(
         "{id} {label}: {:.1} tokens/s ({} of {} layers on the GPU, context {}, loaded in {:.1} s)",
         done.tps(),

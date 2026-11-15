@@ -362,7 +362,7 @@ fn judge(
     hw: &Hardware,
     have: &[String],
     dir: Option<&Path>,
-    speed: impl Fn(u64) -> Option<f32>,
+    speed: impl Fn(u64, u64) -> Option<f32>,
 ) -> Vec<File> {
     listed
         .iter()
@@ -375,7 +375,12 @@ fn judge(
             };
             File {
                 fit: fit(l.size, hw),
-                tps: if mmproj { None } else { speed(l.size) },
+                tps: if mmproj {
+                    None
+                } else {
+                    let share = gguf::moe_share(&l.name).unwrap_or(1.0);
+                    speed(l.size, (l.size as f64 * f64::from(share)) as u64)
+                },
                 name: l.name.clone(),
                 size: l.size,
                 mmproj,
@@ -389,7 +394,7 @@ fn judge(
 fn judge_here(lair: &Lair, repo: &str, listed: &[Listed]) -> Vec<File> {
     let have: Vec<String> = lair.models.local().into_iter().map(|m| m.id).collect();
     let dir = lair.models.dir().map(|d| d.join(folder(repo)));
-    judge(listed, &hardware(), &have, dir.as_deref(), |size| lair.models.predict(size).map(|p| p.tps))
+    judge(listed, &hardware(), &have, dir.as_deref(), |size, reads| lair.models.predict(size, reads).map(|p| p.tps))
 }
 
 /// A repo's files judged for this machine, with what is already installed marked.
@@ -473,7 +478,7 @@ pub async fn plan(http: &reqwest::Client, spec: &str, models: &Path, token: Opti
     };
     let listed = group(tree(http, &repo, token).await?);
     let hw = hardware();
-    let judged = judge(&listed, &hw, &[], None, |_| None);
+    let judged = judge(&listed, &hw, &[], None, |_, _| None);
     let file = pick_file(&judged, quant.as_deref(), &hw).map_err(|e| anyhow::anyhow!("{repo}: {e}"))?;
     Ok(Plan::new(&repo, &listed, &file, models))
 }
@@ -762,7 +767,7 @@ pub async fn first_model(
     let judged = found
         .into_iter()
         .map(|(c, listed)| {
-            let files = judge(&listed, &hw, &[], None, |_| None);
+            let files = judge(&listed, &hw, &[], None, |_, _| None);
             (c, files.into_iter().filter(|f| f.mmproj || f.size <= max).collect())
         })
         .collect();
@@ -912,9 +917,12 @@ mod tests {
         assert_eq!(names, [("big-Q4-00001-of-00003.gguf", 12, 3), ("small.gguf", 3, 1)], "an incomplete set is hidden");
         assert_eq!(listed[0].parts[1].path, "Q4/big-Q4-00002-of-00003.gguf");
         let hw = machine(0, 64 * GB);
-        let files = judge(&listed, &hw, &["big-Q4".into()], None, |size| Some(size as f32));
+        let files = judge(&listed, &hw, &["big-Q4".into()], None, |_, reads| Some(reads as f32));
         assert!(files[0].installed && files[0].parts == 3 && !files[1].installed);
         assert_eq!(files[1].tps, Some(3.0));
+        let moe = group(vec![remote("Qwen3-30B-A3B-Q4_K_M.gguf", 20)]);
+        let files = judge(&moe, &hw, &[], None, |_, reads| Some(reads as f32));
+        assert_eq!(files[0].tps, Some(2.0), "speed follows the experts a token reads, not the file");
     }
 
     fn cand(id: &str, params: u64, trending: f64) -> Candidate {

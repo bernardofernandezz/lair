@@ -249,7 +249,7 @@ impl Engine {
         self.catalog.read().unwrap().clone()
     }
 
-    fn info(&self, id: &str) -> Result<ModelInfo> {
+    pub fn info(&self, id: &str) -> Result<ModelInfo> {
         self.catalog.read().unwrap().iter().find(|m| m.id == id).cloned().ok_or_else(|| anyhow!("unknown model {id}"))
     }
 
