@@ -183,7 +183,9 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     params.reasoning = c.effort.unwrap_or(params.reasoning);
     let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model, agent: c.agent, sources: 0 };
     let max_steps = lair.config().max_steps.unwrap_or(agent::MAX_STEPS);
+    let budget = lair.models.ctx(&step.model) as usize * 3 / 2;
     for _ in 0..max_steps {
+        elide(&mut prompt, budget);
         let Generated { text, reasoning, call, finish } = step.generate(prompt.clone(), params.clone()).await?;
         let Some((raw, call)) = call else {
             return step.finish(text, reasoning, finish);
@@ -443,6 +445,28 @@ fn reference_context(lair: &Lair, refs: &[Ref]) -> Result<String> {
 
 /// Drops the oldest messages (never the last one) until the history fits in `max_chars`, and never
 /// starts on an assistant message, which many chat templates reject.
+/// Shortens the oldest tool results until the prompt fits in `max_chars`, so a long agent task doesn't
+/// overflow the context. The last two stay whole: the model is working from them.
+fn elide(prompt: &mut [Msg], max_chars: usize) {
+    let mut size: usize = prompt.iter().map(|m| m.content.chars().count()).sum();
+    let results: Vec<usize> = (0..prompt.len())
+        .filter(|&i| prompt[i].role == "user" && prompt[i].content.starts_with("<tool_response"))
+        .collect();
+    for &i in &results[..results.len().saturating_sub(2)] {
+        let m = &mut prompt[i];
+        let n = m.content.chars().count();
+        if size <= max_chars {
+            break;
+        }
+        if n < 300 {
+            continue;
+        }
+        let name = m.content.split('"').nth(1).unwrap_or("tool").to_owned();
+        m.content = agent::render_result(&name, &format!("[{n} characters left out to fit the context; run it again if needed]"));
+        size = size - n + m.content.chars().count();
+    }
+}
+
 fn trim(history: &mut Vec<Msg>, max_chars: usize) {
     let mut size: usize = history.iter().map(|m| m.content.chars().count()).sum();
     while history.len() > 1 && (size > max_chars || history[0].role != "user") {
@@ -457,6 +481,19 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> Msg {
         Msg { role: role.into(), content: content.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn old_tool_results_are_shortened_until_the_prompt_fits() {
+        let result = |c: &str| msg("user", &agent::render_result("read_file", &c.repeat(1000)));
+        let mut p = vec![msg("user", "go"), result("a"), msg("assistant", "x"), result("b"), result("c"), result("d")];
+        elide(&mut p, 3000);
+        let whole: Vec<bool> = p.iter().map(|m| m.content.len() > 1000).collect();
+        assert_eq!(whole, [false, false, false, false, true, true], "oldest first, the last two kept");
+        assert!(p[1].content.contains("name=\"read_file\"") && p[1].content.contains("left out"));
+        let mut small = vec![result("a"), result("b"), result("c")];
+        elide(&mut small, 1_000_000);
+        assert!(small.iter().all(|m| m.content.len() > 1000), "nothing cut when it fits");
     }
 
     #[test]
