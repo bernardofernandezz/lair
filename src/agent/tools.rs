@@ -187,6 +187,15 @@ pub static SPECS: &[Spec] = &[
         },
     },
     Spec {
+        name: "update_plan",
+        label: "Plan",
+        subject: "",
+        usage: r#"writes down the steps of a task with several steps, and marks them done as you go; call it first and after each step. {"items": [{"text": "read the config", "done": true}, {"text": "fix the bug", "done": false}]}"#,
+        needs_approval: false,
+        ready: always,
+        run: |_, a| Box::pin(async move { update_plan(a) }),
+    },
+    Spec {
         name: "list_skills",
         label: "List skills",
         subject: "",
@@ -234,6 +243,19 @@ impl Spec {
     pub async fn run(&self, c: &mut Ctx<'_>, args: &Value) -> Result<String> {
         Ok(shorten((self.run)(c, args).await?))
     }
+}
+
+/// The plan as a checklist; the model reads it back, and it shows in the step's card.
+fn update_plan(args: &Value) -> Result<String> {
+    let items = args.get("items").and_then(Value::as_array).context("`items` must be a list of steps")?;
+    let lines: Vec<String> = items
+        .iter()
+        .map(|i| {
+            let mark = if i.get("done").and_then(Value::as_bool).unwrap_or(false) { 'x' } else { ' ' };
+            format!("- [{mark}] {}", i.get("text").and_then(Value::as_str).unwrap_or_default())
+        })
+        .collect();
+    Ok(if lines.is_empty() { "The plan is empty.".into() } else { lines.join("\n") })
 }
 
 fn list_skills(catalog: &Catalog) -> String {
@@ -398,7 +420,7 @@ fn req<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     str_arg(args, key).with_context(|| format!("missing argument \"{key}\" (text)"))
 }
 
-fn shorten(mut s: String) -> String {
+pub fn shorten(mut s: String) -> String {
     if let Some((i, _)) = s.char_indices().nth(MAX_OUTPUT) {
         let total = s.chars().count();
         s.truncate(i);
@@ -462,6 +484,13 @@ mod tests {
         assert!(out.starts_with("[exit code 3]"));
         assert!(out.contains(t.file_name().unwrap().to_str().unwrap()));
         assert!(out.contains("[stderr]\noops"));
+    }
+
+    #[test]
+    fn the_plan_comes_back_as_a_checklist() {
+        let plan = json!({ "items": [{ "text": "read", "done": true }, { "text": "fix" }] });
+        assert_eq!(update_plan(&plan).unwrap(), "- [x] read\n- [ ] fix");
+        assert!(update_plan(&json!({})).is_err());
     }
 
     #[test]

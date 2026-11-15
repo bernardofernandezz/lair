@@ -137,7 +137,9 @@ impl Models {
             .map(|m| {
                 // Tokens per second is a chat model's measure; an embedding model has none.
                 let speed = (!m.meta.embedding)
-                    .then(|| bench.predict(Some(&m.id), m.size, self.offload(&loaded, &m.id, m.size)))
+                    .then(|| {
+                        bench.predict(Some(&m.id), m.meta.read_per_token(m.size), self.offload(&loaded, &m.id, m.size))
+                    })
                     .flatten();
                 ModelEntry {
                     node: None,
@@ -248,7 +250,8 @@ impl Models {
                 && done.completion_tokens >= WORTH_TIMING
                 && let Some(l) = engine.loaded().iter().find(|l| l.id == id)
             {
-                bench.lock().unwrap().record(&id, l.size, l.offload(), done.tps());
+                let reads = engine.info(&id).map_or(l.size, |m| m.meta.read_per_token(l.size));
+                bench.lock().unwrap().record(&id, reads, l.offload(), done.tps());
                 unsaved.lock().unwrap().insert(id.clone());
             }
             let _ = tx.send(match res {
@@ -310,10 +313,11 @@ impl Models {
         self.active.load(Ordering::Relaxed)
     }
 
-    /// How fast a model of `size` bytes not installed yet would run here; `None` until something ran.
-    pub fn predict(&self, size: u64) -> Option<Prediction> {
+    /// How fast a model of `size` bytes not installed yet would run here, `reads` of them per token
+    /// (fewer for mixture-of-experts); `None` until something ran.
+    pub fn predict(&self, size: u64, reads: u64) -> Option<Prediction> {
         let offload = crate::hub::offload_guess(size, &crate::hw::hardware());
-        self.bench.lock().unwrap().predict(None, size, offload)
+        self.bench.lock().unwrap().predict(None, reads, offload)
     }
 
     /// The models measured since this was last asked, if any: time to save them. Only those, so a

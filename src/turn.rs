@@ -172,8 +172,13 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     // ~3 characters per token; half the context for history, half for the reply.
     trim(&mut history, lair.models.ctx(&model) as usize * 3 / 2);
     let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history);
+    let mcp = if c.agent { lair.mcp.get().await } else { Default::default() };
     if c.agent {
-        prompt = with_system(&prompt, &tools::system_prompt(&lair.config()));
+        let mut system = tools::system_prompt(&lair.config());
+        for t in mcp.tools() {
+            system.push_str(&format!("- {}: {}\n", t.name, t.usage));
+        }
+        prompt = with_system(&prompt, &system);
     }
     if let Some(s) = &skill {
         let _ = out.send(Out::Skill(s.clone()));
@@ -181,9 +186,11 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
 
     let mut params = lair.params();
     params.reasoning = c.effort.unwrap_or(params.reasoning);
-    let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model, agent: c.agent, sources: 0 };
+    let mut step = Step { lair, conv, out, skill, tokens: 0, tps: 0.0, model, agent: c.agent, sources: 0, mcp };
     let max_steps = lair.config().max_steps.unwrap_or(agent::MAX_STEPS);
+    let budget = lair.models.ctx(&step.model) as usize * 3 / 2;
     for _ in 0..max_steps {
+        elide(&mut prompt, budget);
         let Generated { text, reasoning, call, finish } = step.generate(prompt.clone(), params.clone()).await?;
         let Some((raw, call)) = call else {
             return step.finish(text, reasoning, finish);
@@ -246,13 +253,17 @@ struct Step<'a> {
     agent: bool,
     /// Web results numbered so far, for citations.
     sources: usize,
+    /// MCP tools as they were when the turn started.
+    mcp: std::sync::Arc<crate::agent::mcp::Mcp>,
 }
 
 impl Step<'_> {
     /// One generation, streamed to the client. In agent mode it stops at the first tool call.
     async fn generate(&mut self, prompt: Vec<Msg>, params: Params) -> Result<Generated> {
         let mut rx = self.lair.models.generate(&self.model, prompt, params);
-        let mut split = self.agent.then(|| CallSplit::new(tools::SPECS.iter().map(|s| s.name)));
+        let mut split = self.agent.then(|| {
+            CallSplit::new(tools::SPECS.iter().map(|s| s.name).chain(self.mcp.tools().iter().map(|t| t.name.as_str())))
+        });
         let (mut text, mut reasoning) = (String::new(), String::new());
         let mut call = None;
         let mut finish = Finish::Stop;
@@ -331,8 +342,8 @@ impl Step<'_> {
             spec.and_then(|s| arguments.get(s.subject)).and_then(Value::as_str).unwrap_or_default().to_owned();
         // A tool the settings keep from working fails at once: nothing to approve.
         let ready = spec.map(|s| s.ready(&self.lair.config()));
-        let needs_approval = spec.is_some_and(|s| s.needs_approval)
-            && ready == Some(Ok(()))
+        let mcp = spec.is_none() && self.mcp.has(&name);
+        let needs_approval = (mcp || spec.is_some_and(|s| s.needs_approval) && ready == Some(Ok(())))
             && !self.lair.approvals.allowed(self.conv, &name);
         let shown = Out::ToolCall {
             id: id.clone(),
@@ -348,9 +359,9 @@ impl Step<'_> {
 
         let (status, output) = match (call, spec) {
             (Err(e), _) => (ToolStatus::Error, format!("{e}. {}", agent::FORMAT_HINT)),
-            (Ok(_), None) => (ToolStatus::Error, format!("tool {name} does not exist")),
+            (Ok(_), None) if !mcp => (ToolStatus::Error, format!("tool {name} does not exist")),
             (Ok(_), Some(_)) if let Some(Err(off)) = ready => (ToolStatus::Error, off.to_owned()),
-            (Ok(_), Some(spec)) => {
+            (Ok(_), spec) => {
                 let allowed = if needs_approval {
                     let mut stopping = self.lair.stopping.subscribe();
                     tokio::select! {
@@ -363,7 +374,13 @@ impl Step<'_> {
                 };
                 match allowed {
                     Some(true) => {
-                        match spec.run(&mut Ctx { lair: self.lair, sources: &mut self.sources }, &arguments).await {
+                        let ran = match spec {
+                            Some(spec) => {
+                                spec.run(&mut Ctx { lair: self.lair, sources: &mut self.sources }, &arguments).await
+                            }
+                            None => self.mcp.call(&name, &arguments).await.map(tools::shorten),
+                        };
+                        match ran {
                             Ok(text) => (ToolStatus::Ok, text),
                             Err(e) => (ToolStatus::Error, format!("{e:#}")),
                         }
@@ -443,6 +460,31 @@ fn reference_context(lair: &Lair, refs: &[Ref]) -> Result<String> {
 
 /// Drops the oldest messages (never the last one) until the history fits in `max_chars`, and never
 /// starts on an assistant message, which many chat templates reject.
+/// Shortens the oldest tool results until the prompt fits in `max_chars`, so a long agent task doesn't
+/// overflow the context. The last two stay whole: the model is working from them.
+fn elide(prompt: &mut [Msg], max_chars: usize) {
+    let mut size: usize = prompt.iter().map(|m| m.content.chars().count()).sum();
+    let results: Vec<usize> = (0..prompt.len())
+        .filter(|&i| prompt[i].role == "user" && prompt[i].content.starts_with("<tool_response"))
+        .collect();
+    for &i in &results[..results.len().saturating_sub(2)] {
+        let m = &mut prompt[i];
+        let n = m.content.chars().count();
+        if size <= max_chars {
+            break;
+        }
+        if n < 300 {
+            continue;
+        }
+        let name = m.content.split('"').nth(1).unwrap_or("tool").to_owned();
+        m.content = agent::render_result(
+            &name,
+            &format!("[{n} characters left out to fit the context; run it again if needed]"),
+        );
+        size = size - n + m.content.chars().count();
+    }
+}
+
 fn trim(history: &mut Vec<Msg>, max_chars: usize) {
     let mut size: usize = history.iter().map(|m| m.content.chars().count()).sum();
     while history.len() > 1 && (size > max_chars || history[0].role != "user") {
@@ -457,6 +499,19 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> Msg {
         Msg { role: role.into(), content: content.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn old_tool_results_are_shortened_until_the_prompt_fits() {
+        let result = |c: &str| msg("user", &agent::render_result("read_file", &c.repeat(1000)));
+        let mut p = vec![msg("user", "go"), result("a"), msg("assistant", "x"), result("b"), result("c"), result("d")];
+        elide(&mut p, 3000);
+        let whole: Vec<bool> = p.iter().map(|m| m.content.len() > 1000).collect();
+        assert_eq!(whole, [false, false, false, false, true, true], "oldest first, the last two kept");
+        assert!(p[1].content.contains("name=\"read_file\"") && p[1].content.contains("left out"));
+        let mut small = vec![result("a"), result("b"), result("c")];
+        elide(&mut small, 1_000_000);
+        assert!(small.iter().all(|m| m.content.len() > 1000), "nothing cut when it fits");
     }
 
     #[test]

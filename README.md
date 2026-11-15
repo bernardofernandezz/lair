@@ -75,6 +75,7 @@ lair pull Qwen/Qwen3-8B-GGUF            # the quant that fits your GPU or RAM
 lair pull Qwen/Qwen3-8B-GGUF:Q5_K_M     # ...or the one you name
 lair pull Qwen3-8B-GGUF                 # a bare name is searched on Hugging Face
 lair pull https://example.com/m.gguf    # any .gguf link
+lair pull Qwen/Qwen3-8B-GGUF --node box  # onto the tailnet node `box`, picked for its hardware
 ```
 
 Vision models come with their projector (`mmproj`), so they can see images right away. Downloads from Hugging Face are checked against the hash it publishes, an interrupted one continues where it stopped when you start it again, and models split into several files come down whole. Gated and private repos need a token: set `HF_TOKEN`, or save one in **Settings → General**.
@@ -85,7 +86,7 @@ lair works out what to run and how, so you don't have to read model cards and co
 
 - **It reads the hardware.** CPU, cores, total and free RAM, each GPU with its total and free memory, and which backend generation runs on (CUDA, Vulkan, Metal or the CPU). **Settings → Models** shows what it found.
 - **It asks Hugging Face what is good right now.** The suggestions are not a fixed list: lair takes what is trending and most downloaded among GGUF repos, adds the ones it vouches for, and judges each against your machine. The **best pick** is the biggest model from a publisher lair trusts that runs fully on your machine, fast, at 4 bits or better; trending breaks ties. Every suggestion says why it is where it is.
-- **It tells you the speed before you download.** Once any model has run here, lair knows how fast this machine moves weights and estimates tokens per second for models you don't have yet (shown with a `~`). Each generation it measures makes the estimates better; `lair bench` measures on purpose. The estimate assumes speed follows model size, which holds for ordinary models and is off for mixture-of-experts ones (faster than estimated) and very small ones.
+- **It tells you the speed before you download.** Once any model has run here, lair knows how fast this machine moves weights and estimates tokens per second for models you don't have yet (shown with a `~`). Each generation it measures makes the estimates better; `lair bench` measures on purpose. The estimate assumes speed follows the weights each token reads: the whole file for ordinary models, only the active experts for mixture-of-experts ones (`Qwen3-30B-A3B` runs about as fast as a 3B model). It is off for very small models.
 - **It tunes each model.** How many layers go to the GPU and how much context a model gets are fitted per model to the memory that is free when it loads, from 8,192 tokens up to 32,768. `--gpu-layers`, `--ctx` and `--threads` override that for every model.
 - **It keeps several models in memory.** As many as fit. Different models answer at the same time; when a new one doesn't fit, the one idle longest makes room. **Settings → Models** shows what is loaded and lets you unload or delete.
 - **`auto` picks per message.** Choose **Auto** in the model picker (or send `"model": "auto"` to the API) and each request goes to the biggest model that is fast right now, on this machine or another of yours, taking into account what is already loaded and how busy each machine is. A message with images goes to a local model that sees. The reply says which model answered and why.
@@ -160,6 +161,13 @@ Switch on **Agent** in the composer and the model can act instead of only writin
 | `web_search`, `fetch_url` | Search through your SearXNG, read a page | ✓ |
 | `search_conversations`, `read_conversation` | Look through saved conversations | |
 | `search_memory` | Find passages of past chats and workspace files by meaning | |
+| `update_plan` | Write down the steps of a longer task and tick them off | |
+
+**MCP servers** add their tools to these. Put them in `<data>/mcp.json` in the format Claude Desktop and Cursor use; lair starts them, and starts them again from the next agent message whenever the file changes. Each tool shows up as `mcp__<server>__<tool>` and always asks first.
+
+```json
+{ "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"] } } }
+```
 
 Before a tool changes something or goes online, lair shows the exact arguments and waits for you to allow it once, allow it for the rest of the conversation, or deny it. File paths can't leave the workspace (`<data>/workspace` by default).
 
@@ -223,6 +231,8 @@ Skills are prompt text, and a malicious one could try to steer the agent. Instal
 ### Your machines, one network
 
 Run lair on a few machines in your [Tailscale](https://tailscale.com) network and each one lists the others' models next to its own, as `model@machine`. Pick one and the conversation stays where you are while the text is generated over there. History, skills and agent tools never leave the machine you're using.
+
+**Settings → Models** manages any of them from wherever you are: pick a machine and you see its hardware, the models Hugging Face has that fit *it*, and what it has installed. Download, load or delete there without opening that machine.
 
 <details>
 <summary>How it works</summary>

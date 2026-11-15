@@ -16,6 +16,15 @@ pub struct Meta {
     pub quant: String,
     /// An embedding model (it declares a pooling type): turns text into vectors, doesn't chat.
     pub embedding: bool,
+    /// Mixture-of-experts: the share of the weights one token reads. `None` for a dense model.
+    pub moe: Option<f32>,
+}
+
+impl Meta {
+    /// The bytes of a `size`-byte file that one token reads, which is what speed follows.
+    pub fn read_per_token(&self, size: u64) -> u64 {
+        self.moe.map_or(size, |s| (size as f64 * f64::from(s)) as u64)
+    }
 }
 
 /// `general.file_type` (llama.cpp's `llama_ftype`) as the name people know.
@@ -67,8 +76,33 @@ pub fn meta_from(get: impl Fn(&str) -> Option<String>, params: u64) -> Meta {
         params,
         quant: get("general.file_type").and_then(|v| v.parse().ok()).map_or("", quant_name).to_owned(),
         embedding: get(&format!("{arch}.pooling_type")).is_some(),
+        moe: ["general.size_label", "general.name"]
+            .iter()
+            .find_map(|k| get(k).and_then(|n| moe_share(&n)))
+            // shortcut: experts used / total ignores shared and attention weights (Mixtral reads ~28%,
+            // this says 25%); sum the tensor sizes per kind if estimates for such models are off.
+            .or_else(|| {
+                let (all, used): (u32, u32) = (num("expert_count"), num("expert_used_count"));
+                (all > used && used > 0).then(|| used as f32 / all as f32)
+            }),
         arch,
     }
+}
+
+/// The share of weights a mixture-of-experts model reads per token, from its name: `Qwen3-30B-A3B`
+/// reads 3 of 30 billion. gpt-oss doesn't say it in its name. `None` for names of dense models.
+pub fn moe_share(name: &str) -> Option<f32> {
+    let n = name.to_ascii_lowercase();
+    if n.contains("gpt-oss") {
+        // 5.1B of 117B, and 3.6B of 21B.
+        return Some(if n.contains("120b") { 0.044 } else { 0.17 });
+    }
+    let billions = |t: &str| t.strip_suffix('b')?.parse::<f32>().ok().filter(|v| *v > 0.0);
+    let words: Vec<&str> = n.split(|c: char| !c.is_ascii_alphanumeric() && c != '.').collect();
+    words.windows(2).find_map(|w| {
+        let (total, active) = (billions(w[0])?, billions(w[1].strip_prefix('a')?)?);
+        (active < total).then(|| active / total)
+    })
 }
 
 /// `name` as a part of a split model: its base name, part number and part count
@@ -171,6 +205,30 @@ mod tests {
         assert!(!m.embedding);
         let bert = meta_from(|k| (k == "general.architecture" || k == "bert.pooling_type").then(|| "bert".into()), 0);
         assert!(bert.embedding && bert.quant.is_empty());
+        assert_eq!((m.moe, m.read_per_token(100)), (None, 100), "dense");
+        let mixtral = meta_from(
+            |k| match k {
+                "general.architecture" => Some("llama".into()),
+                "llama.expert_count" => Some("8".into()),
+                "llama.expert_used_count" => Some("2".into()),
+                _ => None,
+            },
+            0,
+        );
+        assert_eq!(mixtral.moe, Some(0.25));
+        let labelled = meta_from(|k| (k == "general.size_label").then(|| "30B-A3B".into()), 0);
+        assert_eq!(labelled.read_per_token(1000), 100);
+    }
+
+    #[test]
+    fn moe_share_is_read_from_names() {
+        assert_eq!(moe_share("Qwen3-30B-A3B-Q4_K_M"), Some(0.1));
+        assert_eq!(moe_share("Qwen3-235B-A22B-Instruct-2507-GGUF"), Some(22.0 / 235.0));
+        assert_eq!(moe_share("gpt-oss-20b-MXFP4"), Some(0.17));
+        assert_eq!(moe_share("gpt-oss-120b"), Some(0.044));
+        for dense in ["Qwen3-8B-Q4_K_M", "Llama-3.2-3B-Instruct", "a3b", "bge-m3"] {
+            assert_eq!(moe_share(dense), None, "{dense}");
+        }
     }
 
     #[test]

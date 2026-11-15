@@ -334,6 +334,53 @@ pub mod cli {
         Ok(())
     }
 
+    /// `lair pull --node`: the lair serving at `server` passes the download on to `node`, which picks the
+    /// file for its own hardware; this follows its progress until it is done.
+    pub async fn pull_on(server: &str, node: &str, spec: &str, token: Option<&str>) -> Result<()> {
+        if spec.split(['?', '#']).next().is_some_and(|p| p.ends_with(".gguf")) {
+            bail!("another node downloads from Hugging Face only: name the repo, as owner/repo[:QUANT]");
+        }
+        let http = net::client();
+        let hub::Wanted { name, quant } = hub::wanted(spec);
+        let repo = hub::repo_named(&http, name).await?;
+        let url = format!("{}/lair/v1/hub/downloads", server.trim_end_matches('/'));
+        let ask = |r: reqwest::RequestBuilder| {
+            let r = r.query(&[("node", node)]);
+            match token {
+                Some(t) => r.bearer_auth(t),
+                None => r,
+            }
+        };
+        let answer = |r: reqwest::Response| async move {
+            let status = r.status();
+            if !status.is_success() {
+                bail!("{server} answered {status}: {}", r.text().await.unwrap_or_default());
+            }
+            Ok(r.json::<serde_json::Value>().await?)
+        };
+        let sent = ask(http.post(&url)).json(&serde_json::json!({ "repo": repo, "quant": quant })).send().await;
+        let started = answer(sent.with_context(|| format!("is `lair serve` running at {server}?"))?).await?;
+        let file = started["file"].as_str().context("the server didn't say which file")?.to_owned();
+        eprintln!("{node} is downloading {repo}: {file}");
+        let mut shown = progress();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let list = answer(ask(http.get(&url)).send().await?).await?;
+            let d = list
+                .as_array()
+                .and_then(|l| l.iter().find(|d| d["repo"] == repo.as_str() && d["file"] == file.as_str()))
+                .context("the download is gone from that node's list")?;
+            if let Some(e) = d["error"].as_str() {
+                bail!("{node}: {e}");
+            }
+            if d["finished"] == true {
+                eprintln!("{node} has {file}");
+                return Ok(());
+            }
+            shown(d["done"].as_u64().unwrap_or(0), d["total"].as_u64().unwrap_or(0));
+        }
+    }
+
     /// `lair pull`: a .gguf URL downloads as is; anything else names a Hugging Face repo (see [`hub::plan`]), and
     /// the file that fits this machine best (or the quant asked for) comes down with its vision projector.
     pub async fn pull(spec: &str, models: &Path, token: Option<&str>) -> Result<()> {

@@ -5,6 +5,7 @@
 //! also accepts the pythonic `[name(arg='value')]` calls some families emit natively (LFM, Llama 3.2).
 //! Results return in a `<tool_response>` user message, since older chat templates have no `tool` role.
 
+pub mod mcp;
 pub mod tools;
 
 use std::collections::{HashMap, HashSet};

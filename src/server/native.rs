@@ -4,8 +4,9 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, OriginalUri, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -34,7 +35,19 @@ fn sse(item: &impl Serialize) -> axum::response::sse::Event {
     axum::response::sse::Event::default().event(name).data(data)
 }
 
-pub fn routes() -> Router<Arc<AppState>> {
+pub fn routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    // Hardware, suggestions, downloads and installed models of any node: see [`on_node`].
+    let per_node = Router::new()
+        .route("/hub/hardware", get(hub_hardware))
+        .route("/hub/suggested", get(hub_suggested))
+        .route("/hub/search", get(hub_search))
+        .route("/hub/files", get(hub_files))
+        .route("/hub/downloads", get(hub_downloads).post(hub_download).delete(hub_cancel))
+        .route("/models", get(models))
+        .route("/models/{id}", axum::routing::delete(remove_model))
+        .route("/models/{id}/load", post(load_model))
+        .route("/models/{id}/unload", post(unload_model))
+        .route_layer(middleware::from_fn_with_state(state.clone(), on_node));
     Router::new()
         .route("/conversations", get(list).post(create))
         .route("/conversations/search", get(search))
@@ -50,15 +63,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/skills/{id}", put(save_skill).patch(toggle_skill).delete(remove_skill))
         .route("/files", get(file_types).post(upload_file))
         .route("/files/{id}", get(file))
-        .route("/hub/hardware", get(hub_hardware))
-        .route("/hub/suggested", get(hub_suggested))
-        .route("/hub/search", get(hub_search))
-        .route("/hub/files", get(hub_files))
-        .route("/hub/downloads", get(hub_downloads).post(hub_download).delete(hub_cancel))
-        .route("/models", get(models))
-        .route("/models/{id}", axum::routing::delete(remove_model))
-        .route("/models/{id}/load", post(load_model))
-        .route("/models/{id}/unload", post(unload_model))
+        .merge(per_node)
         .route("/memory", get(memory).delete(forget))
         .route("/memory/search", get(memory_search))
         .layer(DefaultBodyLimit::max(attach::MAX_UPLOAD + 64 * 1024))
@@ -257,6 +262,45 @@ async fn generate(State(s): S, Json(r): Json<GenerateRequest>) -> Response {
     Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
+/// `?node=<name>` sends the request to that node instead, which judges models for its own hardware and
+/// downloads to its own disk. Only nodes that discovery found can be named, so no client can point this
+/// server at any other address.
+async fn on_node(State(s): S, Query(q): Query<Vec<(String, String)>>, req: Request, next: Next) -> Response {
+    let Some(node) = q.iter().find(|(k, _)| k == "node").map(|(_, v)| v.clone()) else {
+        return next.run(req).await;
+    };
+    if node == s.lair.node_name() {
+        return next.run(req).await;
+    }
+    let Some(base) = s.lair.peers.base_of(&node) else {
+        return missing(format!("no node named {node} on the network")).into_response();
+    };
+    let rest: Vec<(String, String)> = q.into_iter().filter(|(k, _)| k != "node").collect();
+    let path =
+        req.extensions().get::<OriginalUri>().map_or_else(|| req.uri().path().to_owned(), |u| u.path().to_owned());
+    let (method, kind) = (req.method().clone(), req.headers().get(header::CONTENT_TYPE).cloned());
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else {
+        return bad(anyhow::anyhow!("the request is too large to pass on")).into_response();
+    };
+    let mut out = s.lair.http.request(method, format!("{base}{path}")).query(&rest).body(body).timeout(FORWARD_TIMEOUT);
+    if let Some(kind) = kind {
+        out = out.header(header::CONTENT_TYPE, kind);
+    }
+    let answer = match out.send().await {
+        Ok(a) => a,
+        Err(e) => return bad_gateway(anyhow::anyhow!("{node} didn't answer: {e}")).into_response(),
+    };
+    let (status, kind) = (answer.status(), answer.headers().get(header::CONTENT_TYPE).cloned());
+    let mut resp = (status, answer.bytes().await.unwrap_or_default()).into_response();
+    if let Some(kind) = kind {
+        resp.headers_mut().insert(header::CONTENT_TYPE, kind);
+    }
+    resp
+}
+
+/// Suggestions ask Hugging Face about dozens of repos on a cold cache.
+const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 async fn hub_hardware() -> Json<crate::hw::Hardware> {
     Json(crate::hw::hardware())
 }
@@ -303,12 +347,24 @@ struct DownloadRequest {
     file: String,
 }
 
-/// Starts a download, or continues one that stopped: what was already fetched is kept.
-async fn hub_download(State(s): S, Json(r): Json<DownloadRequest>) -> ApiResult<StatusCode> {
+#[derive(Deserialize)]
+struct StartRequest {
+    repo: String,
+    /// Absent: the file `quant` names, else the best for this machine.
+    file: Option<String>,
+    quant: Option<String>,
+}
+
+/// Starts a download, or continues one that stopped: what was already fetched is kept. Answers the file.
+async fn hub_download(State(s): S, Json(r): Json<StartRequest>) -> ApiResult<Json<Value>> {
     hub::check_repo(&r.repo).map_err(bad)?;
-    download::start(s.lair.clone(), r.repo, r.file).await.map_err(bad)?;
+    let file = match r.file {
+        Some(f) => f,
+        None => hub::choose(&s.lair, &r.repo, r.quant.as_deref()).await.map_err(bad)?,
+    };
+    download::start(s.lair.clone(), r.repo, file.clone()).await.map_err(bad)?;
     // Started, not done: progress is polled from GET /hub/downloads.
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({ "file": file })))
 }
 
 async fn hub_cancel(State(s): S, Query(r): Query<DownloadRequest>) -> ApiResult<StatusCode> {

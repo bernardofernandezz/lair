@@ -212,6 +212,11 @@ impl Peers {
             .collect()
     }
 
+    /// Where `node` is reached, if discovery found it.
+    pub fn base_of(&self, node: &str) -> Option<String> {
+        self.nodes.read().unwrap().iter().find(|n| n.info.name == node).map(|n| n.base.clone())
+    }
+
     /// Splits `model@node` and finds the node, if it is one we know.
     pub fn locate(&self, id: &str) -> Option<(String, String)> {
         let (model, node) = id.rsplit_once('@')?;

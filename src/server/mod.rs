@@ -59,7 +59,7 @@ fn router(state: Arc<AppState>) -> Router {
         .fallback(no_route)
         .layer(DefaultBodyLimit::max(API_BODY));
     let ollama = ollama::routes().route_layer(auth.clone()).fallback(no_route).layer(DefaultBodyLimit::max(API_BODY));
-    let native = native::routes().route_layer(auth).fallback(no_route);
+    let native = native::routes(&state).route_layer(auth).fallback(no_route);
     Router::new().nest("/v1", v1).nest("/api", ollama).nest("/lair/v1", native).fallback(web_ui).with_state(state)
 }
 
