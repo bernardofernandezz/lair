@@ -29,6 +29,8 @@ pub struct Lair {
     /// The folder the agent's tools work in; attachments land there too.
     pub workspace: PathBuf,
     pub approvals: Approvals,
+    /// Tools of the MCP servers in `<data>/mcp.json`, offered to the agent next to its own.
+    pub mcp: crate::agent::mcp::Mcp,
     /// Models being downloaded from Hugging Face.
     pub downloads: crate::download::Downloads,
     /// What Hugging Face last said about the models worth offering.
@@ -63,6 +65,7 @@ pub struct Parts {
     /// What the UI saved ([`Config::saved`]).
     pub saved: Config,
     pub http: reqwest::Client,
+    pub mcp: crate::agent::mcp::Mcp,
 }
 
 impl Lair {
@@ -77,6 +80,7 @@ impl Lair {
             assets: p.assets,
             workspace: p.workspace,
             approvals: Approvals::default(),
+            mcp: p.mcp,
             downloads: Default::default(),
             hub: Default::default(),
             memory: Default::default(),

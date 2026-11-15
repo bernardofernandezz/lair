@@ -137,7 +137,9 @@ impl Models {
             .map(|m| {
                 // Tokens per second is a chat model's measure; an embedding model has none.
                 let speed = (!m.meta.embedding)
-                    .then(|| bench.predict(Some(&m.id), m.meta.read_per_token(m.size), self.offload(&loaded, &m.id, m.size)))
+                    .then(|| {
+                        bench.predict(Some(&m.id), m.meta.read_per_token(m.size), self.offload(&loaded, &m.id, m.size))
+                    })
                     .flatten();
                 ModelEntry {
                     node: None,

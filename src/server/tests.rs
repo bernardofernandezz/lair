@@ -45,6 +45,7 @@ fn state(token: Option<&str>) -> Arc<AppState> {
         flags: Config::default(),
         saved: Config::default(),
         http,
+        mcp: Default::default(),
     })
     .unwrap();
     Arc::new(AppState { lair: Arc::new(lair), token: token.map(str::to_owned), addr: "127.0.0.1:0".into() })

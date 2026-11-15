@@ -420,7 +420,7 @@ fn req<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     str_arg(args, key).with_context(|| format!("missing argument \"{key}\" (text)"))
 }
 
-fn shorten(mut s: String) -> String {
+pub fn shorten(mut s: String) -> String {
     if let Some((i, _)) = s.char_indices().nth(MAX_OUTPUT) {
         let total = s.chars().count();
         s.truncate(i);

@@ -162,6 +162,12 @@ Switch on **Agent** in the composer and the model can act instead of only writin
 | `search_memory` | Find passages of past chats and workspace files by meaning | |
 | `update_plan` | Write down the steps of a longer task and tick them off | |
 
+**MCP servers** add their tools to these. Put them in `<data>/mcp.json` in the format Claude Desktop and Cursor use, and restart lair; each tool shows up as `mcp__<server>__<tool>` and always asks first.
+
+```json
+{ "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"] } } }
+```
+
 Before a tool changes something or goes online, lair shows the exact arguments and waits for you to allow it once, allow it for the rest of the conversation, or deny it. File paths can't leave the workspace (`<data>/workspace` by default).
 
 > [!WARNING]

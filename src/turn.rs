@@ -173,7 +173,11 @@ async fn run_inner(lair: &Lair, conv: &str, input: Input, out: &mpsc::UnboundedS
     trim(&mut history, lair.models.ctx(&model) as usize * 3 / 2);
     let (skill, mut prompt) = lair.skills.read().unwrap().apply(&history);
     if c.agent {
-        prompt = with_system(&prompt, &tools::system_prompt(&lair.config()));
+        let mut system = tools::system_prompt(&lair.config());
+        for t in lair.mcp.tools() {
+            system.push_str(&format!("- {}: {}\n", t.name, t.usage));
+        }
+        prompt = with_system(&prompt, &system);
     }
     if let Some(s) = &skill {
         let _ = out.send(Out::Skill(s.clone()));
@@ -254,7 +258,11 @@ impl Step<'_> {
     /// One generation, streamed to the client. In agent mode it stops at the first tool call.
     async fn generate(&mut self, prompt: Vec<Msg>, params: Params) -> Result<Generated> {
         let mut rx = self.lair.models.generate(&self.model, prompt, params);
-        let mut split = self.agent.then(|| CallSplit::new(tools::SPECS.iter().map(|s| s.name)));
+        let mut split = self.agent.then(|| {
+            CallSplit::new(
+                tools::SPECS.iter().map(|s| s.name).chain(self.lair.mcp.tools().iter().map(|t| t.name.as_str())),
+            )
+        });
         let (mut text, mut reasoning) = (String::new(), String::new());
         let mut call = None;
         let mut finish = Finish::Stop;
@@ -333,8 +341,8 @@ impl Step<'_> {
             spec.and_then(|s| arguments.get(s.subject)).and_then(Value::as_str).unwrap_or_default().to_owned();
         // A tool the settings keep from working fails at once: nothing to approve.
         let ready = spec.map(|s| s.ready(&self.lair.config()));
-        let needs_approval = spec.is_some_and(|s| s.needs_approval)
-            && ready == Some(Ok(()))
+        let mcp = spec.is_none() && self.lair.mcp.has(&name);
+        let needs_approval = (mcp || spec.is_some_and(|s| s.needs_approval) && ready == Some(Ok(())))
             && !self.lair.approvals.allowed(self.conv, &name);
         let shown = Out::ToolCall {
             id: id.clone(),
@@ -350,9 +358,9 @@ impl Step<'_> {
 
         let (status, output) = match (call, spec) {
             (Err(e), _) => (ToolStatus::Error, format!("{e}. {}", agent::FORMAT_HINT)),
-            (Ok(_), None) => (ToolStatus::Error, format!("tool {name} does not exist")),
+            (Ok(_), None) if !mcp => (ToolStatus::Error, format!("tool {name} does not exist")),
             (Ok(_), Some(_)) if let Some(Err(off)) = ready => (ToolStatus::Error, off.to_owned()),
-            (Ok(_), Some(spec)) => {
+            (Ok(_), spec) => {
                 let allowed = if needs_approval {
                     let mut stopping = self.lair.stopping.subscribe();
                     tokio::select! {
@@ -365,7 +373,13 @@ impl Step<'_> {
                 };
                 match allowed {
                     Some(true) => {
-                        match spec.run(&mut Ctx { lair: self.lair, sources: &mut self.sources }, &arguments).await {
+                        let ran = match spec {
+                            Some(spec) => {
+                                spec.run(&mut Ctx { lair: self.lair, sources: &mut self.sources }, &arguments).await
+                            }
+                            None => self.lair.mcp.call(&name, &arguments).await.map(tools::shorten),
+                        };
+                        match ran {
                             Ok(text) => (ToolStatus::Ok, text),
                             Err(e) => (ToolStatus::Error, format!("{e:#}")),
                         }
@@ -462,7 +476,10 @@ fn elide(prompt: &mut [Msg], max_chars: usize) {
             continue;
         }
         let name = m.content.split('"').nth(1).unwrap_or("tool").to_owned();
-        m.content = agent::render_result(&name, &format!("[{n} characters left out to fit the context; run it again if needed]"));
+        m.content = agent::render_result(
+            &name,
+            &format!("[{n} characters left out to fit the context; run it again if needed]"),
+        );
         size = size - n + m.content.chars().count();
     }
 }
