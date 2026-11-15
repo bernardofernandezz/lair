@@ -162,6 +162,7 @@ export function SettingsPanel({ api, open, onClose, tab: openOn, onModelsChanged
       {tab === "models" && (
         <ModelsTab
           api={api}
+          nodes={st?.discovered.map((n) => n.name) ?? []}
           onInstalled={() => {
             refresh();
             onModelsChanged();

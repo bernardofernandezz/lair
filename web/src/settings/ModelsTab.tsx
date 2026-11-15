@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Api, Download, Fit, Hardware, HubFile, HubRepo, LoadedModel, ModelInfo, Suggestion, Why } from "../api";
 import { ModelTags } from "../ModelTags";
 import { bareName, gb, num } from "../models";
@@ -6,6 +6,7 @@ import { pick } from "../i18n";
 
 const T = pick({
   en: {
+    machine: "Machine", thisMachine: "This machine",
     downloads: "Downloads",
     downloadCount: (n: string) => `${n} downloads`,
     fit: {
@@ -38,6 +39,7 @@ const T = pick({
     freed: (s: string) => `Deleted; ${s} freed.`,
   },
   pt: {
+    machine: "Máquina", thisMachine: "Esta máquina",
     downloads: "Downloads",
     downloadCount: (n: string) => `${n} downloads`,
     fit: {
@@ -80,7 +82,10 @@ const keyOf = (d: { repo: string; file: string }) => `${d.repo}/${d.file}`;
 const reasonLine = (why: Why[]) => why.map((w) => T.why[w]).filter(Boolean).join(" · ");
 
 /** Find models on Hugging Face, see which fit this machine, and download them. */
-export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => void }) {
+export function ModelsTab({ api: here, nodes, onInstalled }: { api: Api; nodes: string[]; onInstalled: () => void }) {
+  // `""` is this machine; another node judges its own hardware and downloads to its own disk.
+  const [node, setNode] = useState("");
+  const api = useMemo(() => (node ? { ...here, ...here.at(node) } : here), [here, node]);
   const [hw, setHw] = useState<Hardware | null>(null);
   const [suggested, setSuggested] = useState<Suggestion[] | null>(null);
   const [downloads, setDownloads] = useState<Download[]>([]);
@@ -169,6 +174,27 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
 
   return (
     <div className="models-tab">
+      {nodes.length > 0 && (
+        <label className="node-pick">
+          {T.machine}{" "}
+          <select
+            value={node}
+            onChange={(e) => {
+              setHw(null);
+              setSuggested(null);
+              setLocal(null);
+              setNode(e.target.value);
+            }}
+          >
+            <option value="">{T.thisMachine}</option>
+            {nodes.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <HardwarePanel hw={hw} />
 
       {error && (

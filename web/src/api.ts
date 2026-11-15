@@ -217,14 +217,33 @@ export function client(token: string) {
   /** Multipart calls set their own content-type; only the token rides along. */
   const upload = async <T>(path: string, form: FormData): Promise<T> => (await check(await fetch(path, { method: "POST", headers, body: form }))).json();
 
+  /** The calls that manage one node's models: a peer's when `node` names one, else this machine's. */
+  const onNode = (node: string) => {
+    const at = (path: string) => (node ? `${path}${path.includes("?") ? "&" : "?"}node=${encodeURIComponent(node)}` : path);
+    return {
+      /** The node's models, embedding ones included, and which are in memory. */
+      localModels: () => get<{ models: ModelInfo[]; loaded: LoadedModel[] }>(at(`/lair/v1/models`)),
+      /** Deletes a model's files; answers the bytes freed. */
+      removeModel: (id: string) => send<{ freed: number }>("DELETE", at(`/lair/v1/models/${encodeURIComponent(id)}`)),
+      unloadModel: (id: string) => send<void>("POST", at(`/lair/v1/models/${encodeURIComponent(id)}/unload`)),
+      hardware: () => get<Hardware>(at(`/lair/v1/hub/hardware`)),
+      suggested: () => get<Suggestion[]>(at(`/lair/v1/hub/suggested`)),
+      searchHub: (q: string) => get<HubRepo[]>(at(`/lair/v1/hub/search?q=${encodeURIComponent(q)}`)),
+      hubFiles: (repo: string) => get<{ files: HubFile[]; pick: string | null }>(at(`/lair/v1/hub/files?repo=${encodeURIComponent(repo)}`)),
+      downloads: () => get<Download[]>(at(`/lair/v1/hub/downloads`)),
+      download: (repo: string, file: string) => send<void>("POST", at(`/lair/v1/hub/downloads`), { repo, file }),
+      /** Cancels a running download (deleting what it fetched), or dismisses a finished or failed one. */
+      cancelDownload: (repo: string, file: string) =>
+        send<void>("DELETE", at(`/lair/v1/hub/downloads?repo=${encodeURIComponent(repo)}&file=${encodeURIComponent(file)}`)),
+    };
+  };
+
   return {
+    ...onNode(""),
+    /** The same calls, answered by the tailnet node called `node`. */
+    at: onNode,
     /** Throws AuthError when the token is missing or wrong. */
     models: async (): Promise<ModelInfo[]> => chatModels((await get<{ data: ModelInfo[] }>("/v1/models")).data),
-    /** This machine's models, embedding ones included, and which are in memory. */
-    localModels: () => get<{ models: ModelInfo[]; loaded: LoadedModel[] }>("/lair/v1/models"),
-    /** Deletes a model's files; answers the bytes freed. */
-    removeModel: (id: string) => send<{ freed: number }>("DELETE", `/lair/v1/models/${encodeURIComponent(id)}`),
-    unloadModel: (id: string) => send<void>("POST", `/lair/v1/models/${encodeURIComponent(id)}/unload`),
     memory: () => get<MemoryStatus>("/lair/v1/memory"),
     /** Forgets everything; chats and files are indexed again from scratch. */
     clearMemory: () => send<void>("DELETE", "/lair/v1/memory"),
@@ -255,15 +274,6 @@ export function client(token: string) {
     uploadSkill: (file: File) => upload<Skill>("/lair/v1/skills/upload", one("file", file)),
     skillsIndex: () => get<{ configured: boolean; skills: { entry: IndexEntry; installed: boolean }[] }>("/lair/v1/skills/index"),
 
-    hardware: () => get<Hardware>("/lair/v1/hub/hardware"),
-    suggested: () => get<Suggestion[]>("/lair/v1/hub/suggested"),
-    searchHub: (q: string) => get<HubRepo[]>(`/lair/v1/hub/search?q=${encodeURIComponent(q)}`),
-    hubFiles: (repo: string) => get<{ files: HubFile[]; pick: string | null }>(`/lair/v1/hub/files?repo=${encodeURIComponent(repo)}`),
-    downloads: () => get<Download[]>("/lair/v1/hub/downloads"),
-    download: (repo: string, file: string) => send<void>("POST", "/lair/v1/hub/downloads", { repo, file }),
-    /** Cancels a running download (deleting what it fetched), or dismisses a finished or failed one. */
-    cancelDownload: (repo: string, file: string) =>
-      send<void>("DELETE", `/lair/v1/hub/downloads?repo=${encodeURIComponent(repo)}&file=${encodeURIComponent(file)}`),
 
     settings: () => get<Settings>("/lair/v1/settings"),
     /** Changes the named settings; `""` clears one, the others stay. */

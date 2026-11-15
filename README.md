@@ -231,6 +231,8 @@ Skills are prompt text, and a malicious one could try to steer the agent. Instal
 
 Run lair on a few machines in your [Tailscale](https://tailscale.com) network and each one lists the others' models next to its own, as `model@machine`. Pick one and the conversation stays where you are while the text is generated over there. History, skills and agent tools never leave the machine you're using.
 
+**Settings → Models** manages any of them from wherever you are: pick a machine and you see its hardware, the models Hugging Face has that fit *it*, and what it has installed. Download, load or delete there without opening that machine.
+
 <details>
 <summary>How it works</summary>
 

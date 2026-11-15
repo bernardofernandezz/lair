@@ -96,6 +96,8 @@ async fn the_apis_ask_for_the_token_and_answer_unknown_things_with_404() {
     let (status, ps) = call(&open, "GET", "/api/ps", None, None).await;
     assert!(status == StatusCode::OK && ps["models"].is_array());
     assert_eq!(call(&open, "DELETE", "/lair/v1/models/no-such-model", None, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&open, "GET", "/lair/v1/hub/downloads?node=nowhere", None, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&open, "GET", "/lair/v1/hub/downloads?node=test", None, None).await.0, StatusCode::OK, "itself");
     let gone = json!({ "model": "no-such-model" });
     assert_eq!(call(&open, "DELETE", "/api/delete", None, Some(gone.clone())).await.0, StatusCode::NOT_FOUND);
     assert_eq!(call(&open, "POST", "/api/show", None, Some(gone)).await.0, StatusCode::NOT_FOUND);
