@@ -4,8 +4,10 @@ import { useSearch } from "./useSearch";
 import { pick } from "../i18n";
 
 const T = pick({
-  en: { close: "Close chats", open: "Open chats", chats: "Chats", newChat: "New chat", search: "Search chats", newTitle: "New title", untitled: "Untitled", confirmDelete: (t: string) => `Confirm deleting ${t}`, delete: (t: string) => `Delete ${t}`, deleteQ: "Delete?", none: (q: string) => `Nothing found for “${q}”.`, empty: "Your chats show up here.", settings: "Settings" },
-  pt: { close: "Fechar conversas", open: "Abrir conversas", chats: "Conversas", newChat: "Nova conversa", search: "Buscar conversas", newTitle: "Novo título", untitled: "Sem título", confirmDelete: (t: string) => `Confirmar exclusão de ${t}`, delete: (t: string) => `Excluir ${t}`, deleteQ: "Excluir?", none: (q: string) => `Nada encontrado para “${q}”.`, empty: "Suas conversas aparecem aqui.", settings: "Configurações" },
+  en: {
+    rename: (n: string) => `Rename ${n}`, close: "Close chats", open: "Open chats", chats: "Chats", newChat: "New chat", search: "Search chats", newTitle: "New title", untitled: "Untitled", confirmDelete: (t: string) => `Confirm deleting ${t}`, delete: (t: string) => `Delete ${t}`, deleteQ: "Delete?", none: (q: string) => `Nothing found for “${q}”.`, empty: "Your chats show up here.", settings: "Settings" },
+  pt: {
+    rename: (n: string) => `Renomear ${n}`, close: "Fechar conversas", open: "Abrir conversas", chats: "Conversas", newChat: "Nova conversa", search: "Buscar conversas", newTitle: "Novo título", untitled: "Sem título", confirmDelete: (t: string) => `Confirmar exclusão de ${t}`, delete: (t: string) => `Excluir ${t}`, deleteQ: "Excluir?", none: (q: string) => `Nada encontrado para “${q}”.`, empty: "Suas conversas aparecem aqui.", settings: "Configurações" },
 });
 
 type Props = {
@@ -75,7 +77,7 @@ export function Sidebar({ api, open, onToggle, conversations, current, onOpen, o
                 </button>
               )}
               <span className="conv-actions">
-                <button aria-label={`Renomear ${c.title}`} onClick={() => setEditing(c.id)}>
+                <button aria-label={T.rename(c.title)} onClick={() => setEditing(c.id)}>
                   <svg viewBox="0 0 24 24" aria-hidden>
                     <path d="M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4" />
                   </svg>

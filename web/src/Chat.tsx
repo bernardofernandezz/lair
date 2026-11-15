@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { AUTO, AuthError, ConnectionLost, type Api, type Conversation, type Effort, type FileTypes, type MemoryHit, type ModelInfo, type Ref, type UploadedFile } from "./api";
 import { Composer, type Pending } from "./Composer";
-import { ContextMeter, displayName, isEffort, ModelChip, speedLabel } from "./Controls";
-import { pulse, settle, typed, type OrbSignal } from "./Orb";
+import { ContextMeter, ModelChip } from "./Controls";
+import { bareName, displayName, isEffort, speedLabel } from "./models";
+import { failed, recovered, settle, token, toolDone, toolStarted, typed, type OrbSignal } from "./Orb";
 import { load, save } from "./storage";
 import { Turns } from "./Turns";
 import { addCall, addText, emptyReply, fromStored, setResult, snapshot, type Turn } from "./parts";
@@ -89,7 +90,11 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
   const current = models.find((m) => m.id === model) ?? models[0];
   // With Auto, the context that filled up is the answering model's.
   const answered = models.find((m) => m.id === last?.model);
-  const nameOf = (id: string) => displayName(models.find((m) => m.id === id) ?? { id, thinks: false, loaded: false });
+  const nameOf = (id: string) => {
+    const m = models.find((m) => m.id === id);
+    return m ? displayName(m) : bareName(id);
+  };
+  const lastSpeed = last && speedLabel(last.tps, true);
   const active = turns.length > 0;
   useEffect(() => onActive(active), [active, onActive]);
   useEffect(() => () => abort.current?.abort(), []);
@@ -126,7 +131,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
     setError(null);
     setRoute(null);
     setRecalled([]);
-    signal.current.error = false;
+    recovered(signal.current);
     setBusy(true);
     const before: Turn[] = [...turns, { role: "user", content: text, refs, attachments: files.map(({ file, image }) => ({ name: file.name, image, src: image ? URL.createObjectURL(file) : undefined })) }];
     const reply = emptyReply();
@@ -142,6 +147,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
       for (const { file } of files) attachments.push(await api.uploadFile(file));
       const sig = signal.current;
       await api.turn(conv.current, { content: text, refs: refs.map((r) => r.id), model, effort: effort ?? undefined, agent, attachments }, ctl.signal, (e) => {
+        // Events that change the reply redraw it (`break`); the others only set state of their own (`return`).
         switch (e.event) {
           case "skill":
             reply.skill = e.data;
@@ -149,25 +155,20 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
           case "thinking":
             thinkStart ||= performance.now();
             reply.reasoning += e.data.text;
-            sig.thinking = true;
-            pulse(sig);
+            token(sig, true);
             break;
           case "answer":
             if (thinkStart && reply.thinkMs === undefined) reply.thinkMs = performance.now() - thinkStart;
             addText(reply, e.data.text);
-            sig.thinking = false;
-            pulse(sig);
+            token(sig, false);
             break;
           case "tool_call":
             addCall(reply, e.data, e.data.needs_approval);
-            sig.tool = true;
-            sig.waiting = e.data.needs_approval;
+            toolStarted(sig, e.data.needs_approval);
             break;
           case "tool_result":
             setResult(reply, e.data);
-            sig.tool = false;
-            sig.waiting = false;
-            pulse(sig, true);
+            toolDone(sig);
             break;
           case "model":
             setRoute(e.data);
@@ -184,7 +185,7 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
       });
     } catch (e) {
       if (e instanceof AuthError) return onAuthLost();
-      signal.current.error = true;
+      failed(signal.current);
       // The server already saved the question, so it stays on screen; only an empty reply is dropped.
       if (reply.parts.length === 0 && !reply.reasoning) setTurns(before);
       if (e instanceof ConnectionLost) recover();
@@ -206,11 +207,11 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
         setModels(await api.models());
         if (conv.current) setTurns(fromStored((await api.read(conv.current)).messages));
         setError(null);
-        signal.current.error = false;
+        recovered(signal.current);
         onTurnEnd();
         return;
       } catch {
-        signal.current.error = true;
+        failed(signal.current);
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
@@ -280,9 +281,9 @@ export function Chat({ api, models: initialModels, fileTypes, defaultEffort, onO
               <span>{T.agent}</span>
             </button>
             <span className="tools-gap" />
-            {last && speedLabel(last.tps, true) && (
+            {last && lastSpeed && (
               <span className="tag" title={T.speedOf(nameOf(last.model))}>
-                {speedLabel(last.tps, true)}
+                {lastSpeed}
               </span>
             )}
             <ContextMeter used={tokens} size={(answered ?? current).ctx ?? 0} />

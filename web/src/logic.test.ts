@@ -43,7 +43,7 @@ test("fromStored groups the assistant and tool messages after a question into on
   expect(reply.parts[1]).toMatchObject({ kind: "tool", step: { name: "list_dir", status: "ok", output: "a.md" } });
 });
 
-import { groupByNode, quantOf } from "./Controls";
+import { groupByNode, quantOf } from "./models";
 
 test("quantOf reads the quantization from GGUF file names", () => {
   expect(quantOf("Qwen3-4B-Q4_K_M")).toBe("Q4_K_M");
@@ -89,7 +89,7 @@ test("linkCitations links known sources only, outside code", () => {
   expect(linkCitations("[1]", new Map())).toBe("[1]");
 });
 
-import { bareName } from "./Controls";
+import { bareName } from "./models";
 
 test("bareName drops a trailing quantization only", () => {
   expect(bareName("Qwen3-4B-Q4_K_M")).toBe("Qwen3-4B");
@@ -98,8 +98,7 @@ test("bareName drops a trailing quantization only", () => {
 });
 
 import { AUTO, chatModels } from "./api";
-import { displayName, speedLabel } from "./Controls";
-import { reasonLine } from "./settings/ModelsTab";
+import { displayName, quantLabel, speedLabel, thousands } from "./models";
 
 test("chatModels leaves embedding models out and puts Auto first", () => {
   const models = chatModels([
@@ -123,8 +122,13 @@ test("speedLabel marks an estimate and hides an unknown speed", () => {
   expect(speedLabel(undefined)).toBeNull();
 });
 
-test("reasonLine words a suggestion's reasons in order", () => {
-  const words = { fits: "fits", tight: "tight", fast: "fast", slow: "slow", trusted: "trusted", trending: "trending", gated: "gated", low_quant: "low" };
-  expect(reasonLine(["trusted", "fits", "fast"], words)).toBe("trusted · fits · fast");
-  expect(reasonLine([], words)).toBe("");
+
+test("quantLabel trusts the GGUF, then reads the file name of any part", () => {
+  expect(quantLabel("m-Q8_0.gguf", "Q4_K_M")).toBe("Q4_K_M");
+  expect(quantLabel("big-Q6_K-00001-of-00003.gguf")).toBe("Q6_K");
+  expect(quantLabel("plain")).toBeNull();
+});
+
+test("thousands shortens counts past 999, with a decimal under 10k", () => {
+  expect([999, 1000, 9_940, 10_000, 33_400].map(thousands)).toEqual(["999", "1.0k", "9.9k", "10k", "33k"]);
 });

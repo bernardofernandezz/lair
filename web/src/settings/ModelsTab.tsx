@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Api, Download, Fit, Hardware, HubFile, HubRepo, LoadedModel, ModelInfo, Suggestion, Why } from "../api";
-import { bareName, gb, quantOf, speedHint, speedLabel } from "../Controls";
+import { ModelTags } from "../ModelTags";
+import { bareName, gb, num } from "../models";
 import { pick } from "../i18n";
 
 const T = pick({
   en: {
+    downloads: "Downloads",
+    downloadCount: (n: string) => `${n} downloads`,
     fit: {
       fits: { label: "Fits", hint: "Runs fully on the GPU (or in RAM, without a GPU)." },
       tight: { label: "Tight", hint: "Runs with some layers on the CPU: works, but slower." },
@@ -26,15 +29,17 @@ const T = pick({
     },
     search: "Search Hugging Face", searchPlaceholder: "E.g. qwen3, llama, mistral, gemma", searchLabel: "Search GGUF models on Hugging Face",
     searchHint: "Only repos with .gguf files. Gated and private repos need a Hugging Face token (General tab).", nothing: "Nothing found.",
-    vision: "Vision", thinks: "Thinks", installed: "Installed", download: "Download", listing: "Listing files…", noFiles: "No .gguf model in this repo.",
+    installed: "Installed", download: "Download", listing: "Listing files…", noFiles: "No .gguf model in this repo.",
     parts: (n: number) => `${n} parts`,
-    onDisk: "On this machine", none: "No models yet. Pick one below.", inMemory: "In memory", embeds: "Embeddings",
-    loadedAs: (g: number, l: number, c: number) => `${g} of ${l} layers on the GPU, context ${c.toLocaleString()}`,
+    onDisk: "On this machine", none: "No models yet. Pick one below.", inMemory: "In memory",
+    loadedAs: (g: number, l: number, c: number) => `${g} of ${l} layers on the GPU, context ${num(c)}`,
     unload: "Unload", unloadHint: "Frees its memory; it loads again when a chat uses it.",
     remove: "Delete", confirmRemove: (m: string) => `Delete ${m} from this machine? Its file is removed from disk.`,
     freed: (s: string) => `Deleted; ${s} freed.`,
   },
   pt: {
+    downloads: "Downloads",
+    downloadCount: (n: string) => `${n} downloads`,
     fit: {
       fits: { label: "Cabe", hint: "Roda inteiro na GPU (ou na RAM, sem GPU)." },
       tight: { label: "Apertado", hint: "Roda com parte das camadas na CPU: funciona, mais devagar." },
@@ -56,10 +61,10 @@ const T = pick({
     },
     search: "Buscar no Hugging Face", searchPlaceholder: "Ex.: qwen3, llama, mistral, gemma", searchLabel: "Buscar modelos GGUF no Hugging Face",
     searchHint: "Só repositórios com arquivos .gguf. Repositórios restritos ou privados precisam de um token do Hugging Face (aba Geral).", nothing: "Nada encontrado.",
-    vision: "Visão", thinks: "Pensa", installed: "Instalado", download: "Baixar", listing: "Listando arquivos…", noFiles: "Nenhum modelo .gguf neste repositório.",
+    installed: "Instalado", download: "Baixar", listing: "Listando arquivos…", noFiles: "Nenhum modelo .gguf neste repositório.",
     parts: (n: number) => `${n} partes`,
-    onDisk: "Nesta máquina", none: "Nenhum modelo ainda. Escolha um abaixo.", inMemory: "Na memória", embeds: "Embeddings",
-    loadedAs: (g: number, l: number, c: number) => `${g} de ${l} camadas na GPU, contexto ${c.toLocaleString()}`,
+    onDisk: "Nesta máquina", none: "Nenhum modelo ainda. Escolha um abaixo.", inMemory: "Na memória",
+    loadedAs: (g: number, l: number, c: number) => `${g} de ${l} camadas na GPU, contexto ${num(c)}`,
     unload: "Descarregar", unloadHint: "Libera a memória; ele carrega de novo quando uma conversa usar.",
     remove: "Apagar", confirmRemove: (m: string) => `Apagar ${m} desta máquina? O arquivo é removido do disco.`,
     freed: (s: string) => `Apagado; ${s} liberados.`,
@@ -72,7 +77,7 @@ const active = (d: Download) => !d.finished && !d.error;
 const keyOf = (d: { repo: string; file: string }) => `${d.repo}/${d.file}`;
 
 /** A suggestion's reasons as one line: "trusted publisher · runs fully on this machine · fast here". */
-export const reasonLine = (why: Why[], words: Record<Why, string> = T.why) => why.map((w) => words[w]).filter(Boolean).join(" · ");
+const reasonLine = (why: Why[]) => why.map((w) => T.why[w]).filter(Boolean).join(" · ");
 
 /** Find models on Hugging Face, see which fit this machine, and download them. */
 export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => void }) {
@@ -91,16 +96,15 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
   const fail = (e: unknown) => setError((e as Error).message);
 
   useEffect(() => {
-    api.hardware().then(setHw, fail);
     api.downloads().then(setDownloads, fail);
   }, [api]);
+  // Again after each download: what is installed changed, and so did the free memory.
   useEffect(() => {
     api.suggested().then(setSuggested, (e) => (setSuggested([]), fail(e)));
     api.localModels().then(setLocal, fail);
-    api.hardware().then(setHw, () => {});
+    api.hardware().then(setHw, fail);
   }, [api, installed]);
 
-  // Polls only while something is downloading.
   const polling = downloads.some(active);
   useEffect(() => {
     if (!polling) return;
@@ -185,7 +189,6 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
         <ul className="skill-list">
           {local?.models.map((m) => {
             const loaded = local.loaded.find((l) => l.id === m.id);
-            const speed = speedLabel(m.tps, m.measured);
             return (
               <li key={m.id}>
                 <div className="skill-main">
@@ -194,18 +197,8 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
                     {loaded && <span className="badge is-live">{T.inMemory}</span>}
                   </span>
                   {loaded && <span className="skill-desc">{T.loadedAs(loaded.gpu_layers, loaded.layers, loaded.ctx)}</span>}
-                  <span className="option-meta">
-                    {(m.quant || quantOf(m.id)) && <span className="tag">{m.quant || quantOf(m.id)}</span>}
-                    {m.size ? <span className="tag">{gb(m.size)}</span> : null}
-                    {speed && (
-                      <span className="tag" title={speedHint(m.measured)}>
-                        {speed}
-                      </span>
-                    )}
-                    {m.embedding && <span className="tag">{T.embeds}</span>}
-                    {m.thinks && <span className="tag">{T.thinks}</span>}
-                    {m.vision && <span className="tag">{T.vision}</span>}
-                  </span>
+                  {/* In memory shows as the badge by its name. */}
+                  <ModelTags {...m} name={m.id} loaded={false} />
                 </div>
                 <div className="skill-actions">
                   {loaded && (
@@ -224,8 +217,8 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
       </section>
 
       {downloads.length > 0 && (
-        <section aria-label="Downloads">
-          <h3 className="models-head">Downloads</h3>
+        <section aria-label={T.downloads}>
+          <h3 className="models-head">{T.downloads}</h3>
           <ul className="skill-list">
             {downloads.map((d) => (
               <li key={keyOf(d)} className="download">
@@ -264,7 +257,7 @@ export function ModelsTab({ api, onInstalled }: { api: Api; onInstalled: () => v
             <li key={s.repo} className={s.best ? "is-best" : undefined}>
               <div className="skill-main">
                 <span className="skill-name">
-                  {s.repo.split("/")[1].replace(/-GGUF$/i, "")}
+                  {s.repo.split("/").pop()!.replace(/-GGUF$/i, "")}
                   {s.best && <span className="badge is-live">{T.best}</span>}
                 </span>
                 <span className="skill-desc">{[reasonLine(s.why), s.about].filter(Boolean).join(". ")}</span>
@@ -331,24 +324,13 @@ function HardwarePanel({ hw }: { hw: Hardware | null }) {
 }
 
 function FileTags({ file, vision, thinks }: { file: HubFile; vision?: boolean; thinks?: boolean }) {
-  const quant = quantOf(file.name.replace(/(-\d{5}-of-\d{5})?\.gguf$/i, ""));
-  const speed = speedLabel(file.tps);
   return (
-    <span className="option-meta">
-      {quant && <span className="tag">{quant}</span>}
-      <span className="tag">{gb(file.size)}</span>
+    <ModelTags name={file.name} size={file.size} tps={file.tps} thinks={thinks} vision={vision}>
       {(file.parts ?? 1) > 1 && <span className="tag">{T.parts(file.parts!)}</span>}
       <span className={`tag fit-${file.fit}`} title={FIT[file.fit].hint}>
         {FIT[file.fit].label}
       </span>
-      {speed && (
-        <span className="tag" title={speedHint(false)}>
-          {speed}
-        </span>
-      )}
-      {thinks && <span className="tag">{T.thinks}</span>}
-      {vision && <span className="tag">{T.vision}</span>}
-    </span>
+    </ModelTags>
   );
 }
 
@@ -391,7 +373,7 @@ function RepoRow({
     <li>
       <button className="repo-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         <span className="skill-name">{repo.id}</span>
-        <span className="skill-desc">{repo.downloads.toLocaleString()} downloads</span>
+        <span className="skill-desc">{T.downloadCount(num(repo.downloads))}</span>
       </button>
       {open && (
         <div className="repo-files">

@@ -181,11 +181,24 @@ export type OrbSignal = { pulse: number; listen: number; thinking: boolean; tool
 
 export const newSignal = (): OrbSignal => ({ pulse: 0, listen: 0, thinking: false, tool: false, waiting: false, error: false });
 /** A streamed token; a finished tool counts double. */
-export const pulse = (s: OrbSignal, strong = false) => void (s.pulse = Math.min(1.6, s.pulse + (strong ? 0.6 : 0.3)));
+const pulse = (s: OrbSignal, strong = false) => void (s.pulse = Math.min(1.6, s.pulse + (strong ? 0.6 : 0.3)));
 /** A keystroke in the composer. */
 export const typed = (s: OrbSignal) => void (s.listen = Math.min(1, s.listen + 0.35));
+/** A token of reasoning (`thinking`) or of the answer. */
+export function token(s: OrbSignal, thinking: boolean) {
+  s.thinking = thinking;
+  pulse(s);
+}
+/** A tool started; `waiting` while it waits for the user's approval. */
+export const toolStarted = (s: OrbSignal, waiting: boolean) => void Object.assign(s, { tool: true, waiting });
+export function toolDone(s: OrbSignal) {
+  Object.assign(s, { tool: false, waiting: false });
+  pulse(s, true);
+}
+export const failed = (s: OrbSignal) => void (s.error = true);
+export const recovered = (s: OrbSignal) => void (s.error = false);
 /** The turn ended: nothing running any more. */
-export const settle = (s: OrbSignal) => Object.assign(s, { thinking: false, tool: false, waiting: false });
+export const settle = (s: OrbSignal) => void Object.assign(s, { thinking: false, tool: false, waiting: false });
 
 type Props = {
   signal: RefObject<OrbSignal>;
